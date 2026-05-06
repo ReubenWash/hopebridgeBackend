@@ -7,6 +7,7 @@ const {
   capturePayPalOrder,
   getCreatorPaymentMethod,
   saveCreatorPaymentMethod,
+  getMyDonations,                         // ← added
 } = require('../controllers/donationController')
 const { authenticate, requireCreator } = require('../middleware/auth')
 const { validate } = require('../middleware/errorHandler')
@@ -43,6 +44,9 @@ router.post('/paypal/capture-order',
   ],
   validate, capturePayPalOrder
 )
+
+// ── Authenticated: get logged‑in user's donation history ─────────
+router.get('/my', authenticate, getMyDonations)
 
 // ── Creator: view donations for their campaign ───────────────────
 router.get('/campaign/:id', authenticate, requireCreator, getCampaignDonations)

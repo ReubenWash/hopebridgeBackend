@@ -1,30 +1,35 @@
-
-
-
-
 require('dotenv').config()
-const express     = require('express')
-const cors        = require('cors')
-const helmet      = require('helmet')
-const path        = require('path')
-const rateLimit   = require('express-rate-limit')
+const express = require('express')
+const cors = require('cors')
+const helmet = require('helmet')
+const path = require('path')
+const fs = require('fs')
+const rateLimit = require('express-rate-limit')
 
-const authRoutes     = require('./routes/auth')
+const authRoutes = require('./routes/auth')
 const campaignRoutes = require('./routes/campaigns')
 const donationRoutes = require('./routes/donations')
-const adminRoutes    = require('./routes/admin')
-const publicRoutes   = require('./routes/public')
-const { authenticate } = require('./middleware/auth')       // ✅ added
+const adminRoutes = require('./routes/admin')
+const publicRoutes = require('./routes/public')
+const walletRoutes = require('./routes/wallet')
+const { authenticate } = require('./middleware/auth')
 const { errorHandler } = require('./middleware/errorHandler')
 
-const app  = express()
+const app = express()
 const PORT = process.env.PORT || 5000
 const isDev = (process.env.NODE_ENV || 'development') === 'development'
+
+// ── Create uploads directory if it doesn't exist ─────────────────
+const uploadsDir = path.join(__dirname, '..', 'uploads')
+if (!fs.existsSync(uploadsDir)) {
+  fs.mkdirSync(uploadsDir, { recursive: true })
+  console.log('📁 Created uploads directory')
+}
 
 // ── Security middleware ──────────────────────────────────────────
 app.use(helmet())
 app.use(cors({
-  origin:      process.env.CLIENT_URL || 'http://localhost:5173',
+  origin: process.env.CLIENT_URL || 'http://localhost:5173',
   credentials: true,
 }))
 
@@ -49,25 +54,31 @@ const authLimiter = rateLimit({
 app.use(express.json({ limit: '10mb' }))
 app.use(express.urlencoded({ extended: true }))
 
-// ── Static uploads ───────────────────────────────────────────────
-app.use('/uploads', express.static(path.join(__dirname, '..', 'uploads')))
+// ── Static uploads with CORS headers for images ──────────────────
+app.use('/uploads', (req, res, next) => {
+  // Add headers to allow cross-origin loading of images
+  res.setHeader('Cross-Origin-Resource-Policy', 'cross-origin')
+  res.setHeader('Access-Control-Allow-Origin', process.env.CLIENT_URL || 'http://localhost:5173')
+  next()
+}, express.static(uploadsDir))
 
 // ── Health check ─────────────────────────────────────────────────
 app.get('/health', (req, res) => {
   res.json({
-    status:  'ok',
+    status: 'ok',
     service: 'HopeBridge API',
-    env:     process.env.NODE_ENV || 'development',
-    time:    new Date().toISOString(),
+    env: process.env.NODE_ENV || 'development',
+    time: new Date().toISOString(),
   })
 })
 
 // ── API Routes ───────────────────────────────────────────────────
-app.use('/api/auth',      authLimiter, authRoutes)
+app.use('/api/auth', authLimiter, authRoutes)
 app.use('/api/campaigns', campaignRoutes)
 app.use('/api/donations', donationRoutes)
-app.use('/api/admin',     authenticate, adminRoutes)  // ✅ authenticate runs once here
-app.use('/api',           publicRoutes)
+app.use('/api/admin', authenticate, adminRoutes)
+app.use('/api/wallet', authenticate, walletRoutes)
+app.use('/api', publicRoutes)
 
 // ── 404 handler ──────────────────────────────────────────────────
 app.use((req, res) => {

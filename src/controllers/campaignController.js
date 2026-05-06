@@ -4,6 +4,13 @@ const {
   sendNewCampaignAdminAlert,
 } = require('../utils/email')
 
+// Helper to ensure image_url is absolute
+const ensureAbsoluteImageUrl = (url, req) => {
+  if (!url) return null;
+  if (url.startsWith('http')) return url;
+  return `${req.protocol}://${req.get('host')}${url.startsWith('/') ? url : '/' + url}`;
+};
+
 // GET /api/campaigns  — public, approved only (with pagination + search)
 const getAllCampaigns = async (req, res, next) => {
   try {
@@ -34,8 +41,14 @@ const getAllCampaigns = async (req, res, next) => {
       LIMIT $${idx} OFFSET $${idx + 1}
     `, values)
 
+    // Ensure image URLs are absolute
+    const campaigns = result.rows.map(c => ({
+      ...c,
+      image_url: ensureAbsoluteImageUrl(c.image_url, req)
+    }));
+
     res.json({
-      campaigns: result.rows,
+      campaigns,
       total:     parseInt(countRes.rows[0].count),
       page:      parseInt(page),
       pages:     Math.ceil(parseInt(countRes.rows[0].count) / parseInt(limit)),
@@ -55,7 +68,12 @@ const getCampaign = async (req, res, next) => {
     `, [req.params.id])
 
     if (result.rows.length === 0) return res.status(404).json({ error: 'Campaign not found.' })
-    res.json({ campaign: result.rows[0] })
+    
+    const campaign = {
+      ...result.rows[0],
+      image_url: ensureAbsoluteImageUrl(result.rows[0].image_url, req)
+    };
+    res.json({ campaign })
   } catch (err) { next(err) }
 }
 
@@ -146,7 +164,14 @@ const getMyCampaigns = async (req, res, next) => {
       WHERE c.creator_id = $1
       ORDER BY c.created_at DESC
     `, [req.user.id])
-    res.json({ campaigns: result.rows })
+    
+    // Ensure image URLs are absolute
+    const campaigns = result.rows.map(c => ({
+      ...c,
+      image_url: ensureAbsoluteImageUrl(c.image_url, req)
+    }));
+    
+    res.json({ campaigns })
   } catch (err) { next(err) }
 }
 
@@ -167,7 +192,13 @@ const adminGetAllCampaigns = async (req, res, next) => {
       ${where}
       ORDER BY c.created_at DESC
     `, values)
-    res.json({ campaigns: result.rows })
+    
+    const campaigns = result.rows.map(c => ({
+      ...c,
+      image_url: ensureAbsoluteImageUrl(c.image_url, req)
+    }));
+    
+    res.json({ campaigns })
   } catch (err) { next(err) }
 }
 

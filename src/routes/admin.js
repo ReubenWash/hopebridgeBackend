@@ -11,6 +11,10 @@ const {
   sendMassMail,
   saveFCMToken,
 } = require('../controllers/adminController')
+const {
+  getAllDepositRequests,
+  updateDepositRequest,
+} = require('../controllers/adminWalletController')
 
 // NOTE: authenticate runs once in server.js via app.use('/api/admin', authenticate, adminRoutes)
 // So we only need requireAdmin here for role checking
@@ -45,5 +49,9 @@ router.put('/content',                saveContent)
 
 // ── Mass Mail ──────────────────────────────────────────────────────
 router.post('/mass-mail',             sendMassMail)
+
+// ── Wallet & Deposit Requests (Admin) ──────────────────────────────
+router.get('/deposit-requests',       getAllDepositRequests)
+router.put('/deposit-requests/:id',   updateDepositRequest)
 
 module.exports = router

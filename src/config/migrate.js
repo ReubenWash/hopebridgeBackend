@@ -45,7 +45,7 @@ const migrate = async () => {
         amount       NUMERIC(10,2) NOT NULL CHECK (amount > 0),
         message      TEXT,
         is_monthly   BOOLEAN NOT NULL DEFAULT false,
-        payment_method VARCHAR(20) DEFAULT 'card',    -- 'card' or 'paypal'
+        payment_method VARCHAR(20) DEFAULT 'card',    -- 'card', 'paypal', 'wallet'
         created_at   TIMESTAMPTZ NOT NULL DEFAULT NOW()
       );
 
@@ -62,12 +62,50 @@ const migrate = async () => {
         updated_at   TIMESTAMPTZ NOT NULL DEFAULT NOW()
       );
 
-      -- Auto-update updated_at columns
+      -- WALLET SYSTEM TABLES
+      -- Wallets (one per user)
+      CREATE TABLE IF NOT EXISTS wallets (
+        user_id     INTEGER PRIMARY KEY REFERENCES users(id) ON DELETE CASCADE,
+        balance     NUMERIC(12,2) NOT NULL DEFAULT 0,
+        updated_at  TIMESTAMPTZ NOT NULL DEFAULT NOW()
+      );
+
+      -- Deposit requests (user asks to add money)
+      CREATE TABLE IF NOT EXISTS deposit_requests (
+        id                 SERIAL PRIMARY KEY,
+        user_id            INTEGER NOT NULL REFERENCES users(id) ON DELETE CASCADE,
+        amount             NUMERIC(12,2) NOT NULL CHECK (amount > 0),
+        status             VARCHAR(20) NOT NULL DEFAULT 'pending'
+                           CHECK (status IN ('pending','awaiting_proof','approved','rejected')),
+        admin_instructions TEXT,
+        payment_method     VARCHAR(50),
+        payment_details    TEXT,
+        proof_image_url    VARCHAR(500),
+        admin_notes        TEXT,
+        created_at         TIMESTAMPTZ NOT NULL DEFAULT NOW(),
+        updated_at         TIMESTAMPTZ NOT NULL DEFAULT NOW()
+      );
+
+      -- Transaction ledger
+      CREATE TABLE IF NOT EXISTS wallet_transactions (
+        id           SERIAL PRIMARY KEY,
+        user_id      INTEGER NOT NULL REFERENCES users(id) ON DELETE CASCADE,
+        amount       NUMERIC(12,2) NOT NULL,
+        type         VARCHAR(30) NOT NULL
+                     CHECK (type IN ('deposit','donation_out','refund_in')),
+        reference_id INTEGER, -- donation.id or deposit_request.id
+        description  TEXT,
+        status       VARCHAR(20) DEFAULT 'completed',
+        created_at   TIMESTAMPTZ NOT NULL DEFAULT NOW()
+      );
+
+      -- Auto-update updated_at function (already exists, but safe to re‑create)
       CREATE OR REPLACE FUNCTION update_updated_at()
       RETURNS TRIGGER AS $$
       BEGIN NEW.updated_at = NOW(); RETURN NEW; END;
       $$ LANGUAGE plpgsql;
 
+      -- Apply updated_at triggers
       DROP TRIGGER IF EXISTS users_updated_at ON users;
       CREATE TRIGGER users_updated_at
         BEFORE UPDATE ON users
@@ -82,35 +120,56 @@ const migrate = async () => {
       CREATE TRIGGER disputes_updated_at
         BEFORE UPDATE ON disputes
         FOR EACH ROW EXECUTE FUNCTION update_updated_at();
-    `)
 
-    // ── New columns & tables (idempotent) ──────────────────────────
+      DROP TRIGGER IF EXISTS wallets_updated_at ON wallets;
+      CREATE TRIGGER wallets_updated_at
+        BEFORE UPDATE ON wallets
+        FOR EACH ROW EXECUTE FUNCTION update_updated_at();
+
+      DROP TRIGGER IF EXISTS deposit_requests_updated_at ON deposit_requests;
+      CREATE TRIGGER deposit_requests_updated_at
+        BEFORE UPDATE ON deposit_requests
+        FOR EACH ROW EXECUTE FUNCTION update_updated_at();
+
+      -- Trigger to create wallet automatically for new users
+      CREATE OR REPLACE FUNCTION create_wallet_for_new_user()
+      RETURNS TRIGGER AS $$
+      BEGIN
+        INSERT INTO wallets (user_id, balance) VALUES (NEW.id, 0)
+        ON CONFLICT (user_id) DO NOTHING;
+        RETURN NEW;
+      END;
+      $$ LANGUAGE plpgsql;
+
+      DROP TRIGGER IF EXISTS create_wallet_trigger ON users;
+      CREATE TRIGGER create_wallet_trigger
+        AFTER INSERT ON users
+        FOR EACH ROW
+        EXECUTE FUNCTION create_wallet_for_new_user();
+    `);
+
+    // ── Existing columns & tables (idempotent) ──────────────────────────
     await client.query(`
-      -- Add verification fields to users
       ALTER TABLE users ADD COLUMN IF NOT EXISTS verification_token TEXT;
       ALTER TABLE users ADD COLUMN IF NOT EXISTS verification_expires TIMESTAMPTZ;
       ALTER TABLE users ADD COLUMN IF NOT EXISTS is_verified BOOLEAN DEFAULT false;
-
-      -- Add FCM token to users
       ALTER TABLE users ADD COLUMN IF NOT EXISTS fcm_token TEXT;
-
-      -- Add payment_method to donations (if not already present)
       ALTER TABLE donations ADD COLUMN IF NOT EXISTS payment_method VARCHAR(20) DEFAULT 'card';
-
-      -- Settings table (theme, keys, content)
-      CREATE TABLE IF NOT EXISTS settings (
-        key   TEXT PRIMARY KEY,
-        value TEXT NOT NULL
-      );
-
-      -- Creator payment methods
+      CREATE TABLE IF NOT EXISTS settings ( key TEXT PRIMARY KEY, value TEXT NOT NULL );
       CREATE TABLE IF NOT EXISTS creator_payment_methods (
-        user_id       INTEGER PRIMARY KEY REFERENCES users(id) ON DELETE CASCADE,
-        paypal_email  TEXT NOT NULL
+        user_id INTEGER PRIMARY KEY REFERENCES users(id) ON DELETE CASCADE,
+        paypal_email TEXT NOT NULL
       );
-    `)
+    `);
 
-    console.log('✅ Migrations complete — all tables created/updated.')
+    // ── Create wallets for existing users that don't have one yet ────────
+    await client.query(`
+      INSERT INTO wallets (user_id, balance)
+      SELECT id, 0 FROM users
+      WHERE id NOT IN (SELECT user_id FROM wallets)
+    `);
+
+    console.log('✅ Migrations complete — all tables (including wallet system) created/updated.')
   } catch (err) {
     console.error('❌ Migration failed:', err.message)
     throw err

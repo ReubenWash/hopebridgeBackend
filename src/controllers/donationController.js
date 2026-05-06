@@ -13,7 +13,7 @@ const getSetting = async (key) => {
 const getPayPalAccessToken = async () => {
   const clientId = await getSetting('paypal_client_id');
   const secret   = await getSetting('paypal_client_secret');
-  const mode     = (await getSetting('paypal_mode')) || 'sandbox';   // sandbox / live
+  const mode     = (await getSetting('paypal_mode')) || 'sandbox';
 
   if (!clientId || !secret) {
     throw new Error('PayPal credentials not configured');
@@ -37,12 +37,11 @@ const getPayPalAccessToken = async () => {
   return { access_token: response.data.access_token, baseURL };
 };
 
-// ── PayPal order creation (used by frontend donation form) ──────────
+// ── PayPal order creation ─────────────────────────────────────────
 const createPayPalOrder = async (req, res, next) => {
   try {
     const { campaign_id, amount, donor_name, donor_email, message, is_monthly } = req.body;
 
-    // Verify campaign
     const campRes = await pool.query(
       "SELECT id, title, status FROM campaigns WHERE id = $1",
       [campaign_id]
@@ -52,10 +51,8 @@ const createPayPalOrder = async (req, res, next) => {
       return res.status(400).json({ error: 'Donations are only accepted for approved campaigns.' });
     }
 
-    // Get PayPal access token and base URL
     const { access_token, baseURL } = await getPayPalAccessToken();
 
-    // Create order
     const order = await axios.post(
       `${baseURL}/v2/checkout/orders`,
       {
@@ -81,16 +78,14 @@ const createPayPalOrder = async (req, res, next) => {
   } catch (err) { next(err); }
 };
 
-// ── PayPal order capture (triggered after buyer approves) ───────────
+// ── PayPal order capture ──────────────────────────────────────────
 const capturePayPalOrder = async (req, res, next) => {
   try {
     const { orderID } = req.body;
     if (!orderID) return res.status(400).json({ error: 'Order ID is required.' });
 
-    // Get PayPal access token and base URL
     const { access_token, baseURL } = await getPayPalAccessToken();
 
-    // Capture payment
     const captureResponse = await axios.post(
       `${baseURL}/v2/checkout/orders/${orderID}/capture`,
       {},
@@ -107,7 +102,6 @@ const capturePayPalOrder = async (req, res, next) => {
       return res.status(400).json({ error: 'Payment not completed.' });
     }
 
-    // Extract donation details from the custom_id of the purchase unit
     const purchaseUnit = captureData.purchase_units[0];
     const customString = purchaseUnit.payments?.captures?.[0]?.custom ||
                          purchaseUnit.custom_id ||
@@ -122,14 +116,12 @@ const capturePayPalOrder = async (req, res, next) => {
     const { campaign_id, donor_name, donor_email, message, is_monthly } = custom;
     const amount = purchaseUnit.amount.value;
 
-    // Verify campaign again (just to be safe)
     const campRes = await pool.query(
       "SELECT id, title, status FROM campaigns WHERE id = $1",
       [campaign_id]
     );
     if (campRes.rows.length === 0) return res.status(404).json({ error: 'Campaign not found.' });
 
-    // Insert donation record
     const result = await pool.query(`
       INSERT INTO donations (campaign_id, donor_name, donor_email, amount, message, is_monthly, payment_method)
       VALUES ($1, $2, $3, $4, $5, $6, 'paypal')
@@ -143,7 +135,6 @@ const capturePayPalOrder = async (req, res, next) => {
       is_monthly || false
     ]);
 
-    // Update campaign raised amount
     await pool.query(`
       UPDATE campaigns
       SET raised = (SELECT COALESCE(SUM(amount), 0) FROM donations WHERE campaign_id = $1)
@@ -152,7 +143,6 @@ const capturePayPalOrder = async (req, res, next) => {
 
     const donation = result.rows[0];
 
-    // Send confirmation email
     sendDonationConfirmation({
       to:             donation.donor_email,
       donorName:      donation.donor_name,
@@ -167,7 +157,7 @@ const capturePayPalOrder = async (req, res, next) => {
   } catch (err) { next(err); }
 };
 
-// ── Creator payment methods ─────────────────────────────────────────
+// ── Creator payment methods ────────────────────────────────────────
 const getCreatorPaymentMethod = async (req, res, next) => {
   try {
     const userId = req.user.id;
@@ -187,7 +177,6 @@ const saveCreatorPaymentMethod = async (req, res, next) => {
 
     if (!paypal_email) return res.status(400).json({ error: 'PayPal email is required.' });
 
-    // Upsert
     await pool.query(`
       INSERT INTO creator_payment_methods (user_id, paypal_email)
       VALUES ($1, $2)
@@ -198,8 +187,7 @@ const saveCreatorPaymentMethod = async (req, res, next) => {
   } catch (err) { next(err); }
 };
 
-// ── Original functions (unchanged) ──────────────────────────────────
-// POST /api/donations
+// ── Card donation (without PayPal) ─────────────────────────────────
 const createDonation = async (req, res, next) => {
   try {
     const { campaign_id, donor_name, donor_email, amount, message = '', is_monthly = false } = req.body;
@@ -243,7 +231,7 @@ const createDonation = async (req, res, next) => {
   } catch (err) { next(err); }
 };
 
-// GET /api/donations/campaign/:id
+// ── Get donations for a specific campaign (creator/admin) ─────────
 const getCampaignDonations = async (req, res, next) => {
   try {
     const { id } = req.params;
@@ -271,7 +259,7 @@ const getCampaignDonations = async (req, res, next) => {
   } catch (err) { next(err); }
 };
 
-// GET /api/admin/donations
+// ── Get all donations (admin only) ────────────────────────────────
 const adminGetAllDonations = async (req, res, next) => {
   try {
     const result = await pool.query(`
@@ -286,6 +274,25 @@ const adminGetAllDonations = async (req, res, next) => {
   } catch (err) { next(err); }
 };
 
+// ── NEW: Get logged‑in user's donation history (for donor dashboard) ─
+const getMyDonations = async (req, res, next) => {
+  try {
+    // Use donor_email (stored in donations) or user's email from JWT
+    // We use the email from the authenticated user (donors have an email)
+    const userEmail = req.user.email;
+    const result = await pool.query(`
+      SELECT d.*, c.title AS campaign_title
+      FROM donations d
+      JOIN campaigns c ON d.campaign_id = c.id
+      WHERE d.donor_email = $1
+      ORDER BY d.created_at DESC
+      LIMIT 50
+    `, [userEmail]);
+    const total = result.rows.reduce((sum, d) => sum + parseFloat(d.amount), 0);
+    res.json({ donations: result.rows, total });
+  } catch (err) { next(err); }
+};
+
 module.exports = {
   createDonation,
   getCampaignDonations,
@@ -294,4 +301,5 @@ module.exports = {
   capturePayPalOrder,
   getCreatorPaymentMethod,
   saveCreatorPaymentMethod,
+  getMyDonations,      // ← exported for donor dashboard
 };
