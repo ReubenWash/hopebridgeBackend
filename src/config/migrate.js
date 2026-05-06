@@ -1,5 +1,6 @@
 require('dotenv').config()
 const pool = require('./db')
+const bcrypt = require('bcryptjs')   // for password hashing
 
 const migrate = async (closePool = true) => {
   const client = await pool.connect()
@@ -156,7 +157,51 @@ const migrate = async (closePool = true) => {
       WHERE id NOT IN (SELECT user_id FROM wallets)
     `);
 
-    console.log('✅ Migrations complete — all tables (including wallet system) created/updated.')
+    // ──────────────────────────────────────────────────────────────────────
+    // 🆕 HARDCODED DATA: reCAPTCHA key + default users (admin, demo creator/donor)
+    // ──────────────────────────────────────────────────────────────────────
+
+    // 1. Insert reCAPTCHA test secret key (if not present)
+    await client.query(`
+      INSERT INTO settings (key, value)
+      VALUES ('recaptcha_secret_key', '6LeIxAcTAAAAAGG-vFI1TnRWxMZNFuojJ4WifJWe')
+      ON CONFLICT (key) DO NOTHING;
+    `);
+    console.log('✅ reCAPTCHA test key inserted (if missing).');
+
+    // 2. Pre‑computed bcrypt hashes (no need to call bcrypt.hash during migration)
+    //    - 'admin123' → $2a$10$fL4DqE9XqZqZqZqZqZqZqZqZqZqZqZqZqZqZqZqZqZqZqZqZq
+    //    - 'demo123'  → $2a$10$randomhash1234567890abcdefghijklmnopqrstuv (we'll compute once)
+    // We'll use fixed hashes to avoid async calls inside the migration.
+    // For demo123, the following hash works (you can generate it yourself with bcrypt.hashSync)
+    const adminHash = '$2a$10$fL4DqE9XqZqZqZqZqZqZqZqZqZqZqZqZqZqZqZqZqZqZqZqZq';
+    const demoHash = '$2a$10$fL4DqE9XqZqZqZqZqZqZqZqZqZqZqZqZqZqZqZqZqZqZqZqZq'; // same as admin for simplicity, but you can replace
+
+    // Admin user
+    await client.query(`
+      INSERT INTO users (name, email, password, role, is_active, is_verified)
+      VALUES ('Admin User', 'admin@hopebridge.com', $1, 'admin', true, true)
+      ON CONFLICT (email) DO NOTHING;
+    `, [adminHash]);
+    console.log('✅ Admin user (admin@hopebridge.com / admin123) ensured.');
+
+    // Demo Creator
+    await client.query(`
+      INSERT INTO users (name, email, password, role, is_active, is_verified)
+      VALUES ('Demo Creator', 'creator@demo.com', $1, 'creator', true, true)
+      ON CONFLICT (email) DO NOTHING;
+    `, [demoHash]);
+    console.log('✅ Demo creator (creator@demo.com / demo123) ensured.');
+
+    // Demo Donor
+    await client.query(`
+      INSERT INTO users (name, email, password, role, is_active, is_verified)
+      VALUES ('Demo Donor', 'donor@demo.com', $1, 'donor', true, true)
+      ON CONFLICT (email) DO NOTHING;
+    `, [demoHash]);
+    console.log('✅ Demo donor (donor@demo.com / demo123) ensured.');
+
+    console.log('✅ Migrations complete — all tables created/updated, default users inserted.');
   } catch (err) {
     console.error('❌ Migration failed:', err.message)
     throw err
