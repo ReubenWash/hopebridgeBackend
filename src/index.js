@@ -5,6 +5,7 @@ const helmet = require('helmet')
 const path = require('path')
 const fs = require('fs')
 const rateLimit = require('express-rate-limit')
+const bcrypt = require('bcryptjs')        // added for temp endpoint
 
 const authRoutes = require('./routes/auth')
 const campaignRoutes = require('./routes/campaigns')
@@ -14,7 +15,8 @@ const publicRoutes = require('./routes/public')
 const walletRoutes = require('./routes/wallet')
 const { authenticate } = require('./middleware/auth')
 const { errorHandler } = require('./middleware/errorHandler')
-const { migrate } = require('./config/migrate')   // import migration function
+const { migrate } = require('./config/migrate')
+const pool = require('./config/db')        // added for temp endpoint
 
 const app = express()
 const PORT = process.env.PORT || 5000
@@ -72,6 +74,21 @@ app.get('/health', (req, res) => {
   })
 })
 
+// 🔧 TEMPORARY ROUTE – Remove after admin login works 🔧
+app.post('/temp-create-admin', async (req, res) => {
+  try {
+    const hash = await bcrypt.hash('admin123', 10)
+    await pool.query(`
+      INSERT INTO users (name, email, password, role, is_active, is_verified)
+      VALUES ('Admin User', 'admin@hopebridge.com', $1, 'admin', true, true)
+      ON CONFLICT (email) DO UPDATE SET password = EXCLUDED.password, is_active = true, is_verified = true
+    `, [hash])
+    res.json({ message: 'Admin user created/updated with fresh hash. Try login now.' })
+  } catch (err) {
+    res.status(500).json({ error: err.message })
+  }
+})
+
 // ── API Routes ───────────────────────────────────────────────────
 app.use('/api/auth', authLimiter, authRoutes)
 app.use('/api/campaigns', campaignRoutes)
@@ -93,12 +110,10 @@ const runMigrations = async () => {
   if (!isDev) {
     console.log('🔧 Running database migrations (production mode)...')
     try {
-      // Pass false to prevent pool.end() so the app keeps using the pool
       await migrate(false)
       console.log('✅ Database migrations completed successfully')
     } catch (err) {
       console.error('❌ Migration failed:', err.message)
-      // Do not exit; the app may still work if tables already exist
     }
   }
 }
