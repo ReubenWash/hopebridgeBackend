@@ -1,8 +1,6 @@
 const { Pool } = require('pg')
 require('dotenv').config()
 
-const isProduction = process.env.NODE_ENV === 'production'
-
 // Build connection configuration
 let config = {
   max: 10,
@@ -11,11 +9,11 @@ let config = {
 }
 
 if (process.env.DATABASE_URL) {
-  // Use the full connection string (provided by Render or other platforms)
+  // Use the full connection string (Neon, Render, etc.)
   config.connectionString = process.env.DATABASE_URL
-  if (isProduction) {
-    config.ssl = { rejectUnauthorized: false }
-  }
+  // Neon and Render require SSL. The connection string already has sslmode=require,
+  // but we add the Node.js SSL option to avoid self‑signed certificate errors.
+  config.ssl = { rejectUnauthorized: false }
 } else {
   // Fallback to individual environment variables for local development
   config = {
