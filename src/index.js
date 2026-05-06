@@ -14,6 +14,7 @@ const publicRoutes = require('./routes/public')
 const walletRoutes = require('./routes/wallet')
 const { authenticate } = require('./middleware/auth')
 const { errorHandler } = require('./middleware/errorHandler')
+const { migrate } = require('./config/migrate')   // import migration function
 
 const app = express()
 const PORT = process.env.PORT || 5000
@@ -56,7 +57,6 @@ app.use(express.urlencoded({ extended: true }))
 
 // ── Static uploads with CORS headers for images ──────────────────
 app.use('/uploads', (req, res, next) => {
-  // Add headers to allow cross-origin loading of images
   res.setHeader('Cross-Origin-Resource-Policy', 'cross-origin')
   res.setHeader('Access-Control-Allow-Origin', process.env.CLIENT_URL || 'http://localhost:5173')
   next()
@@ -88,12 +88,32 @@ app.use((req, res) => {
 // ── Global error handler ─────────────────────────────────────────
 app.use(errorHandler)
 
-// ── Start server ─────────────────────────────────────────────────
-app.listen(PORT, () => {
-  console.log(`\n🚀 HopeBridge API running on http://localhost:${PORT}`)
-  console.log(`   Environment : ${process.env.NODE_ENV || 'development'}`)
-  console.log(`   Rate limits : ${isDev ? 'DISABLED (dev mode)' : 'ENABLED (production)'}`)
-  console.log(`   Health check: http://localhost:${PORT}/health\n`)
+// ── Run migrations automatically in production (idempotent) ─────
+const runMigrations = async () => {
+  if (!isDev) {
+    console.log('🔧 Running database migrations (production mode)...')
+    try {
+      // Pass false to prevent pool.end() so the app keeps using the pool
+      await migrate(false)
+      console.log('✅ Database migrations completed successfully')
+    } catch (err) {
+      console.error('❌ Migration failed:', err.message)
+      // Do not exit; the app may still work if tables already exist
+    }
+  }
+}
+
+// ── Start server after migrations ────────────────────────────────
+runMigrations().then(() => {
+  app.listen(PORT, () => {
+    console.log(`\n🚀 HopeBridge API running on http://localhost:${PORT}`)
+    console.log(`   Environment : ${process.env.NODE_ENV || 'development'}`)
+    console.log(`   Rate limits : ${isDev ? 'DISABLED (dev mode)' : 'ENABLED (production)'}`)
+    console.log(`   Health check: http://localhost:${PORT}/health\n`)
+  })
+}).catch(err => {
+  console.error('Fatal error during migration:', err)
+  process.exit(1)
 })
 
 module.exports = app

@@ -1,7 +1,7 @@
 require('dotenv').config()
 const pool = require('./db')
 
-const migrate = async () => {
+const migrate = async (closePool = true) => {
   const client = await pool.connect()
   try {
     console.log('🔄 Running migrations...')
@@ -45,7 +45,7 @@ const migrate = async () => {
         amount       NUMERIC(10,2) NOT NULL CHECK (amount > 0),
         message      TEXT,
         is_monthly   BOOLEAN NOT NULL DEFAULT false,
-        payment_method VARCHAR(20) DEFAULT 'card',    -- 'card', 'paypal', 'wallet'
+        payment_method VARCHAR(20) DEFAULT 'card',
         created_at   TIMESTAMPTZ NOT NULL DEFAULT NOW()
       );
 
@@ -63,14 +63,12 @@ const migrate = async () => {
       );
 
       -- WALLET SYSTEM TABLES
-      -- Wallets (one per user)
       CREATE TABLE IF NOT EXISTS wallets (
         user_id     INTEGER PRIMARY KEY REFERENCES users(id) ON DELETE CASCADE,
         balance     NUMERIC(12,2) NOT NULL DEFAULT 0,
         updated_at  TIMESTAMPTZ NOT NULL DEFAULT NOW()
       );
 
-      -- Deposit requests (user asks to add money)
       CREATE TABLE IF NOT EXISTS deposit_requests (
         id                 SERIAL PRIMARY KEY,
         user_id            INTEGER NOT NULL REFERENCES users(id) ON DELETE CASCADE,
@@ -86,52 +84,41 @@ const migrate = async () => {
         updated_at         TIMESTAMPTZ NOT NULL DEFAULT NOW()
       );
 
-      -- Transaction ledger
       CREATE TABLE IF NOT EXISTS wallet_transactions (
         id           SERIAL PRIMARY KEY,
         user_id      INTEGER NOT NULL REFERENCES users(id) ON DELETE CASCADE,
         amount       NUMERIC(12,2) NOT NULL,
         type         VARCHAR(30) NOT NULL
                      CHECK (type IN ('deposit','donation_out','refund_in')),
-        reference_id INTEGER, -- donation.id or deposit_request.id
+        reference_id INTEGER,
         description  TEXT,
         status       VARCHAR(20) DEFAULT 'completed',
         created_at   TIMESTAMPTZ NOT NULL DEFAULT NOW()
       );
 
-      -- Auto-update updated_at function (already exists, but safe to re‑create)
+      -- Auto-update updated_at function
       CREATE OR REPLACE FUNCTION update_updated_at()
       RETURNS TRIGGER AS $$
       BEGIN NEW.updated_at = NOW(); RETURN NEW; END;
       $$ LANGUAGE plpgsql;
 
-      -- Apply updated_at triggers
+      -- Triggers
       DROP TRIGGER IF EXISTS users_updated_at ON users;
-      CREATE TRIGGER users_updated_at
-        BEFORE UPDATE ON users
-        FOR EACH ROW EXECUTE FUNCTION update_updated_at();
+      CREATE TRIGGER users_updated_at BEFORE UPDATE ON users FOR EACH ROW EXECUTE FUNCTION update_updated_at();
 
       DROP TRIGGER IF EXISTS campaigns_updated_at ON campaigns;
-      CREATE TRIGGER campaigns_updated_at
-        BEFORE UPDATE ON campaigns
-        FOR EACH ROW EXECUTE FUNCTION update_updated_at();
+      CREATE TRIGGER campaigns_updated_at BEFORE UPDATE ON campaigns FOR EACH ROW EXECUTE FUNCTION update_updated_at();
 
       DROP TRIGGER IF EXISTS disputes_updated_at ON disputes;
-      CREATE TRIGGER disputes_updated_at
-        BEFORE UPDATE ON disputes
-        FOR EACH ROW EXECUTE FUNCTION update_updated_at();
+      CREATE TRIGGER disputes_updated_at BEFORE UPDATE ON disputes FOR EACH ROW EXECUTE FUNCTION update_updated_at();
 
       DROP TRIGGER IF EXISTS wallets_updated_at ON wallets;
-      CREATE TRIGGER wallets_updated_at
-        BEFORE UPDATE ON wallets
-        FOR EACH ROW EXECUTE FUNCTION update_updated_at();
+      CREATE TRIGGER wallets_updated_at BEFORE UPDATE ON wallets FOR EACH ROW EXECUTE FUNCTION update_updated_at();
 
       DROP TRIGGER IF EXISTS deposit_requests_updated_at ON deposit_requests;
-      CREATE TRIGGER deposit_requests_updated_at
-        BEFORE UPDATE ON deposit_requests
-        FOR EACH ROW EXECUTE FUNCTION update_updated_at();
+      CREATE TRIGGER deposit_requests_updated_at BEFORE UPDATE ON deposit_requests FOR EACH ROW EXECUTE FUNCTION update_updated_at();
 
-      -- Trigger to create wallet automatically for new users
+      -- Auto-wallet trigger for new users
       CREATE OR REPLACE FUNCTION create_wallet_for_new_user()
       RETURNS TRIGGER AS $$
       BEGIN
@@ -148,7 +135,7 @@ const migrate = async () => {
         EXECUTE FUNCTION create_wallet_for_new_user();
     `);
 
-    // ── Existing columns & tables (idempotent) ──────────────────────────
+    // ── Add columns and extra tables (idempotent) ──────────────────────────
     await client.query(`
       ALTER TABLE users ADD COLUMN IF NOT EXISTS verification_token TEXT;
       ALTER TABLE users ADD COLUMN IF NOT EXISTS verification_expires TIMESTAMPTZ;
@@ -162,7 +149,7 @@ const migrate = async () => {
       );
     `);
 
-    // ── Create wallets for existing users that don't have one yet ────────
+    // ── Backfill wallets for existing users ────────────────────────────────
     await client.query(`
       INSERT INTO wallets (user_id, balance)
       SELECT id, 0 FROM users
@@ -175,8 +162,14 @@ const migrate = async () => {
     throw err
   } finally {
     client.release()
-    await pool.end()
+    if (closePool) await pool.end()
   }
 }
 
-migrate().catch(() => process.exit(1))
+// If this file is run directly (node migrate.js), execute migration and close pool
+if (require.main === module) {
+  migrate(true).catch(() => process.exit(1))
+} else {
+  // When imported as a module, export the function (do not close pool automatically)
+  module.exports = { migrate }
+}
