@@ -28,7 +28,7 @@ async function createTransporter() {
   })
 }
 
-// Base HTML email wrapper (unchanged)
+// Base HTML email wrapper
 const htmlWrap = (body) => `
 <!DOCTYPE html>
 <html>
@@ -59,10 +59,9 @@ const htmlWrap = (body) => `
 </body>
 </html>`
 
-// ── Email templates (updated for creators only) ─────────────────
+// ── Core email templates ───────────────────────────────────────────
 
 async function sendWelcomeEmail({ to, name, role }) {
-  // role is always 'creator' in our new flow, but keep generic
   const transporter = await createTransporter()
   await transporter.sendMail({
     from: process.env.EMAIL_FROM || '"HopeBridge" <noreply@hopebridge.org>',
@@ -157,7 +156,112 @@ async function sendVerificationEmail({ to, name, code }) {
   })
 }
 
-// ── Mass mail sender (already uses dynamic transporter) ─────────
+async function sendNewDonationAdminAlert({ adminEmail, donorName, amount, campaignTitle, campaignId, paymentMethod }) {
+  const transporter = await createTransporter()
+  await transporter.sendMail({
+    from: process.env.EMAIL_FROM || '"HopeBridge" <noreply@hopebridge.org>',
+    to: adminEmail,
+    subject: `[New Donation] $${amount} received for "${campaignTitle}"`,
+    html: htmlWrap(`
+      <h2>New Donation Received! 💰</h2>
+      <p>A new donation has been successfully processed on the platform.</p>
+      <div class="highlight">
+        <strong>Campaign:</strong> ${campaignTitle}<br>
+        <strong>Donor:</strong> ${donorName || 'Anonymous'}<br>
+        <strong>Amount:</strong> <strong>$${amount}</strong><br>
+        <strong>Payment Method:</strong> ${paymentMethod}<br>
+        <strong>Campaign ID:</strong> #${campaignId}
+      </div>
+      <p>Visit the <a href="${process.env.ADMIN_URL || 'https://hopebridge.org/admin'}" style="color:#e8531e;">admin dashboard</a> to see all recent donations.</p>
+    `),
+  })
+}
+
+// ── Wallet-related email alerts ───────────────────────────────────
+
+// Admin: new deposit request
+async function sendNewDepositRequestAlert({ adminEmail, userName, userEmail, amount, requestId }) {
+  const transporter = await createTransporter()
+  await transporter.sendMail({
+    from: process.env.EMAIL_FROM || '"HopeBridge" <noreply@hopebridge.org>',
+    to: adminEmail,
+    subject: `[Deposit Request] $${amount} from ${userName}`,
+    html: htmlWrap(`
+      <h2>New Deposit Request 💰</h2>
+      <p>A user has requested a wallet deposit:</p>
+      <div class="highlight">
+        <strong>User:</strong> ${userName} (${userEmail})<br>
+        <strong>Amount:</strong> $${amount}<br>
+        <strong>Request ID:</strong> #${requestId}
+      </div>
+      <p>Please log in to the admin dashboard to provide payment instructions.</p>
+    `),
+  })
+}
+
+// User: deposit request status update (approved/rejected)
+async function sendDepositStatusEmail({ to, userName, amount, status, adminNote, requestId }) {
+  const transporter = await createTransporter()
+  const isApproved = status === 'approved'
+  await transporter.sendMail({
+    from: process.env.EMAIL_FROM || '"HopeBridge" <noreply@hopebridge.org>',
+    to,
+    subject: `Your deposit request of $${amount} has been ${status}`,
+    html: htmlWrap(`
+      <h2>Deposit Request ${isApproved ? 'Approved ✅' : 'Rejected ❌'}</h2>
+      <p>Dear <strong>${userName}</strong>,</p>
+      <div class="highlight">
+        <strong>Amount:</strong> $${amount}<br>
+        <strong>Status:</strong> ${status.toUpperCase()}
+      </div>
+      ${adminNote ? `<p><strong>Admin note:</strong> ${adminNote}</p>` : ''}
+      ${isApproved ? '<p>The amount has been credited to your wallet balance.</p>' : '<p>If you have questions, please contact support.</p>'}
+    `),
+  })
+}
+
+// Admin: new withdrawal request
+async function sendWithdrawalRequestAlert({ adminEmail, userName, userEmail, amount, withdrawalId }) {
+  const transporter = await createTransporter()
+  await transporter.sendMail({
+    from: process.env.EMAIL_FROM || '"HopeBridge" <noreply@hopebridge.org>',
+    to: adminEmail,
+    subject: `[Withdrawal Request] $${amount} from ${userName}`,
+    html: htmlWrap(`
+      <h2>New Withdrawal Request 💸</h2>
+      <p>A creator has requested a withdrawal:</p>
+      <div class="highlight">
+        <strong>User:</strong> ${userName} (${userEmail})<br>
+        <strong>Amount:</strong> $${amount}<br>
+        <strong>Request ID:</strong> #${withdrawalId}
+      </div>
+      <p>Please log in to the admin dashboard to approve or reject.</p>
+    `),
+  })
+}
+
+// User: withdrawal request status update (approved/rejected)
+async function sendWithdrawalStatusEmail({ to, userName, amount, status, adminNote }) {
+  const transporter = await createTransporter()
+  const isApproved = status === 'approved' || status === 'paid'
+  await transporter.sendMail({
+    from: process.env.EMAIL_FROM || '"HopeBridge" <noreply@hopebridge.org>',
+    to,
+    subject: `Your withdrawal request of $${amount} has been ${status}`,
+    html: htmlWrap(`
+      <h2>Withdrawal Request ${isApproved ? 'Approved ✅' : 'Rejected ❌'}</h2>
+      <p>Dear <strong>${userName}</strong>,</p>
+      <div class="highlight">
+        <strong>Amount:</strong> $${amount}<br>
+        <strong>Status:</strong> ${status.toUpperCase()}
+      </div>
+      ${adminNote ? `<p><strong>Admin note:</strong> ${adminNote}</p>` : ''}
+      ${isApproved ? '<p>The funds have been deducted from your wallet and will be sent to your payment method.</p>' : ''}
+    `),
+  })
+}
+
+// ── Mass mail sender ─────────────────────────────────────────────
 async function sendMassEmail({ transporter: t, to, subject, text }) {
   if (!t || !to || to.length === 0) throw new Error('Missing email parameters');
 
@@ -180,6 +284,7 @@ async function sendMassEmail({ transporter: t, to, subject, text }) {
   });
 }
 
+// ── Exports ──────────────────────────────────────────────────────
 module.exports = {
   sendWelcomeEmail,
   sendDonationConfirmation,
@@ -187,4 +292,11 @@ module.exports = {
   sendNewCampaignAdminAlert,
   sendVerificationEmail,
   sendMassEmail,
+  sendNewDonationAdminAlert,
+
+  // Wallet alerts
+  sendNewDepositRequestAlert,
+  sendDepositStatusEmail,
+  sendWithdrawalRequestAlert,
+  sendWithdrawalStatusEmail,
 }

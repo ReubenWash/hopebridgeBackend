@@ -1,4 +1,5 @@
 const pool = require('../config/db');
+const { sendDepositStatusEmail } = require('../utils/email');
 
 // Get all deposit requests (admin)
 const getAllDepositRequests = async (req, res, next) => {
@@ -22,6 +23,16 @@ const updateDepositRequest = async (req, res, next) => {
   try {
     await client.query('BEGIN');
 
+    // Get request before update to have user_id and amount
+    const beforeUpdate = await client.query(
+      'SELECT user_id, amount FROM deposit_requests WHERE id = $1',
+      [id]
+    );
+    if (beforeUpdate.rows.length === 0) {
+      return res.status(404).json({ error: 'Request not found' });
+    }
+    const { user_id, amount } = beforeUpdate.rows[0];
+
     // Update request
     const result = await client.query(
       `UPDATE deposit_requests 
@@ -35,9 +46,10 @@ const updateDepositRequest = async (req, res, next) => {
     );
     if (result.rows.length === 0) return res.status(404).json({ error: 'Request not found' });
 
+    const request = result.rows[0];
+
     // If approved, credit wallet
     if (status === 'approved') {
-      const request = result.rows[0];
       // Credit wallet
       await client.query('UPDATE wallets SET balance = balance + $1 WHERE user_id = $2', [request.amount, request.user_id]);
       // Record ledger entry
@@ -49,6 +61,22 @@ const updateDepositRequest = async (req, res, next) => {
     }
 
     await client.query('COMMIT');
+
+    // Send email notification to user if status changed to approved or rejected
+    if (status && (status === 'approved' || status === 'rejected')) {
+      const userRes = await pool.query('SELECT name, email FROM users WHERE id = $1', [user_id]);
+      if (userRes.rows.length > 0) {
+        sendDepositStatusEmail({
+          to: userRes.rows[0].email,
+          userName: userRes.rows[0].name,
+          amount: request.amount,
+          status,
+          adminNote: admin_notes || null,
+          requestId: id,
+        }).catch(e => console.warn('User deposit status email failed:', e.message));
+      }
+    }
+
     res.json({ message: `Deposit request ${status || 'updated'}`, request: result.rows[0] });
   } catch (err) {
     await client.query('ROLLBACK');
