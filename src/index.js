@@ -5,7 +5,7 @@ const helmet = require('helmet')
 const path = require('path')
 const fs = require('fs')
 const rateLimit = require('express-rate-limit')
-const bcrypt = require('bcryptjs')        // added for temp endpoint
+const bcrypt = require('bcryptjs')
 
 const authRoutes = require('./routes/auth')
 const campaignRoutes = require('./routes/campaigns')
@@ -16,7 +16,7 @@ const walletRoutes = require('./routes/wallet')
 const { authenticate } = require('./middleware/auth')
 const { errorHandler } = require('./middleware/errorHandler')
 const { migrate } = require('./config/migrate')
-const pool = require('./config/db')        // added for temp endpoint
+const pool = require('./config/db')
 
 const app = express()
 const PORT = process.env.PORT || 5000
@@ -29,14 +29,37 @@ if (!fs.existsSync(uploadsDir)) {
   console.log('📁 Created uploads directory')
 }
 
-// ── Security middleware ──────────────────────────────────────────
+// ── CORS: allow multiple origins (comma‑separated from env) ──────
+const rawOrigins = process.env.CLIENT_URL || 'http://localhost:5173'
+const allowedOrigins = rawOrigins.split(',').map(o => o.trim())
+
 app.use(helmet())
 app.use(cors({
-  origin: process.env.CLIENT_URL || 'http://localhost:5173',
+  origin: function (origin, callback) {
+    // Allow requests with no origin (like mobile apps or curl)
+    if (!origin) return callback(null, true)
+    if (allowedOrigins.indexOf(origin) !== -1 || allowedOrigins[0] === '*') {
+      callback(null, true)
+    } else {
+      callback(new Error('Not allowed by CORS'))
+    }
+  },
   credentials: true,
 }))
 
-// Global rate limit — relaxed in dev, strict in production
+// ── Static uploads with dynamic CORS header ──────────────────────
+app.use('/uploads', (req, res, next) => {
+  const origin = req.headers.origin
+  if (origin && (allowedOrigins.includes(origin) || allowedOrigins[0] === '*')) {
+    res.setHeader('Access-Control-Allow-Origin', origin)
+  } else if (allowedOrigins[0] === '*') {
+    res.setHeader('Access-Control-Allow-Origin', '*')
+  }
+  res.setHeader('Cross-Origin-Resource-Policy', 'cross-origin')
+  next()
+}, express.static(uploadsDir))
+
+// ── Rate limiting (relaxed in dev) ───────────────────────────────
 app.use(rateLimit({
   windowMs: 15 * 60 * 1000,
   max: isDev ? 10000 : 100,
@@ -44,7 +67,6 @@ app.use(rateLimit({
   skip: () => isDev,
 }))
 
-// Auth rate limit — relaxed in dev, strict in production
 const authLimiter = rateLimit({
   windowMs: 15 * 60 * 1000,
   max: isDev ? 10000 : 20,
@@ -56,13 +78,6 @@ const authLimiter = rateLimit({
 // ── Body parsers ─────────────────────────────────────────────────
 app.use(express.json({ limit: '10mb' }))
 app.use(express.urlencoded({ extended: true }))
-
-// ── Static uploads with CORS headers for images ──────────────────
-app.use('/uploads', (req, res, next) => {
-  res.setHeader('Cross-Origin-Resource-Policy', 'cross-origin')
-  res.setHeader('Access-Control-Allow-Origin', process.env.CLIENT_URL || 'http://localhost:5173')
-  next()
-}, express.static(uploadsDir))
 
 // ── Health check ─────────────────────────────────────────────────
 app.get('/health', (req, res) => {
@@ -123,6 +138,7 @@ runMigrations().then(() => {
   app.listen(PORT, () => {
     console.log(`\n🚀 HopeBridge API running on http://localhost:${PORT}`)
     console.log(`   Environment : ${process.env.NODE_ENV || 'development'}`)
+    console.log(`   Allowed origins: ${allowedOrigins.join(', ')}`)
     console.log(`   Rate limits : ${isDev ? 'DISABLED (dev mode)' : 'ENABLED (production)'}`)
     console.log(`   Health check: http://localhost:${PORT}/health\n`)
   })
