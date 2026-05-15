@@ -1,20 +1,32 @@
 const pool = require('../config/db');
-const { sendDepositStatusEmail } = require('../utils/email');
+const { sendDepositStatusEmail, sendWithdrawalStatusEmail } = require('../utils/email');
 
-// Get all deposit requests (admin)
+// ─────────────────────────────────────────────
+// GET ALL DEPOSIT REQUESTS
+// ─────────────────────────────────────────────
 const getAllDepositRequests = async (req, res, next) => {
   try {
-    const result = await pool.query(`
-      SELECT dr.*, u.name, u.email 
+    const { status } = req.query;
+    let query = `
+      SELECT dr.*, u.name, u.email
       FROM deposit_requests dr
       JOIN users u ON dr.user_id = u.id
-      ORDER BY dr.created_at DESC
-    `);
+    `;
+    const params = [];
+    if (status) {
+      query += ' WHERE dr.status = $1';
+      params.push(status);
+    }
+    query += ' ORDER BY dr.created_at DESC';
+
+    const result = await pool.query(query, params);
     res.json({ requests: result.rows });
   } catch (err) { next(err); }
 };
 
-// Admin updates deposit request (add payment instructions, then later approve/reject)
+// ─────────────────────────────────────────────
+// UPDATE DEPOSIT REQUEST (admin provides instructions OR approves/rejects)
+// ─────────────────────────────────────────────
 const updateDepositRequest = async (req, res, next) => {
   const { id } = req.params;
   const { status, admin_instructions, payment_method, payment_details, admin_notes } = req.body;
@@ -23,61 +35,81 @@ const updateDepositRequest = async (req, res, next) => {
   try {
     await client.query('BEGIN');
 
-    // Get request before update to have user_id and amount
     const beforeUpdate = await client.query(
-      'SELECT user_id, amount FROM deposit_requests WHERE id = $1',
+      'SELECT * FROM deposit_requests WHERE id = $1',
       [id]
     );
     if (beforeUpdate.rows.length === 0) {
+      await client.query('ROLLBACK');
       return res.status(404).json({ error: 'Request not found' });
     }
-    const { user_id, amount } = beforeUpdate.rows[0];
 
-    // Update request
+    const existing = beforeUpdate.rows[0];
+
+    // Build update
     const result = await client.query(
-      `UPDATE deposit_requests 
+      `UPDATE deposit_requests
        SET status = COALESCE($1, status),
            admin_instructions = COALESCE($2, admin_instructions),
            payment_method = COALESCE($3, payment_method),
            payment_details = COALESCE($4, payment_details),
-           admin_notes = COALESCE($5, admin_notes)
-       WHERE id = $6 RETURNING *`,
-      [status, admin_instructions, payment_method, payment_details, admin_notes, id]
+           admin_notes = COALESCE($5, admin_notes),
+           processed_at = CASE WHEN $1 IN ('approved','rejected') THEN NOW() ELSE processed_at END
+       WHERE id = $6
+       RETURNING *`,
+      [status || null, admin_instructions || null, payment_method || null, payment_details || null, admin_notes || null, id]
     );
-    if (result.rows.length === 0) return res.status(404).json({ error: 'Request not found' });
 
     const request = result.rows[0];
 
-    // If approved, credit wallet
+    // On approval: credit wallet
     if (status === 'approved') {
-      // Credit wallet
-      await client.query('UPDATE wallets SET balance = balance + $1 WHERE user_id = $2', [request.amount, request.user_id]);
-      // Record ledger entry
       await client.query(
-        `INSERT INTO wallet_transactions (user_id, amount, type, reference_id, description)
+        `INSERT INTO wallets (user_id, balance) VALUES ($1, $2)
+         ON CONFLICT (user_id) DO UPDATE SET balance = wallets.balance + $2`,
+        [existing.user_id, existing.amount]
+      );
+
+      await client.query(
+        `INSERT INTO wallet_transactions (user_id, amount, type, reference, description)
          VALUES ($1, $2, 'deposit', $3, $4)`,
-        [request.user_id, request.amount, id, `Deposit request #${id} approved`]
+        [existing.user_id, existing.amount, `DEP-${id}`, `Deposit request #${id} approved`]
       );
     }
 
     await client.query('COMMIT');
 
-    // Send email notification to user if status changed to approved or rejected
-    if (status && (status === 'approved' || status === 'rejected')) {
-      const userRes = await pool.query('SELECT name, email FROM users WHERE id = $1', [user_id]);
-      if (userRes.rows.length > 0) {
+    // Email user on status changes
+    const userRes = await pool.query('SELECT name, email FROM users WHERE id = $1', [existing.user_id]);
+    if (userRes.rows.length > 0) {
+      const user = userRes.rows[0];
+
+      if (status === 'approved' || status === 'rejected') {
         sendDepositStatusEmail({
-          to: userRes.rows[0].email,
-          userName: userRes.rows[0].name,
-          amount: request.amount,
+          to: user.email,
+          userName: user.name,
+          amount: existing.amount,
           status,
           adminNote: admin_notes || null,
           requestId: id,
-        }).catch(e => console.warn('User deposit status email failed:', e.message));
+        }).catch(e => console.warn('Deposit status email failed:', e.message));
+      } else if (status === 'instructions_sent' && admin_instructions) {
+        // Notify user that instructions are available
+        sendDepositStatusEmail({
+          to: user.email,
+          userName: user.name,
+          amount: existing.amount,
+          status: 'instructions_sent',
+          adminNote: admin_instructions,
+          requestId: id,
+        }).catch(e => console.warn('Instructions email failed:', e.message));
       }
     }
 
-    res.json({ message: `Deposit request ${status || 'updated'}`, request: result.rows[0] });
+    res.json({
+      message: `Deposit request ${status || 'updated'} successfully`,
+      request,
+    });
   } catch (err) {
     await client.query('ROLLBACK');
     next(err);
@@ -86,7 +118,140 @@ const updateDepositRequest = async (req, res, next) => {
   }
 };
 
+// ─────────────────────────────────────────────
+// GET ALL WITHDRAWAL REQUESTS
+// ─────────────────────────────────────────────
+const getAllWithdrawalRequests = async (req, res, next) => {
+  try {
+    const result = await pool.query(`
+      SELECT wr.*, u.name, u.email
+      FROM withdrawal_requests wr
+      JOIN users u ON wr.user_id = u.id
+      ORDER BY wr.created_at DESC
+    `);
+    res.json({ withdrawals: result.rows });
+  } catch (err) { next(err); }
+};
+
+// ─────────────────────────────────────────────
+// APPROVE WITHDRAWAL
+// ─────────────────────────────────────────────
+const approveWithdrawal = async (req, res, next) => {
+  const client = await pool.connect();
+  try {
+    const { id } = req.params;
+
+    await client.query('BEGIN');
+
+    const wdRes = await client.query(
+      'SELECT * FROM withdrawal_requests WHERE id = $1 FOR UPDATE',
+      [id]
+    );
+    if (wdRes.rows.length === 0) {
+      await client.query('ROLLBACK');
+      return res.status(404).json({ error: 'Request not found' });
+    }
+
+    const wd = wdRes.rows[0];
+    if (wd.status !== 'pending') {
+      await client.query('ROLLBACK');
+      return res.status(400).json({ error: 'Request already processed' });
+    }
+
+    // Check wallet balance
+    const walletRes = await client.query(
+      'SELECT balance FROM wallets WHERE user_id = $1 FOR UPDATE',
+      [wd.user_id]
+    );
+    const balance = parseFloat(walletRes.rows[0]?.balance || 0);
+    if (balance < wd.amount) {
+      await client.query('ROLLBACK');
+      return res.status(400).json({ error: 'User has insufficient balance' });
+    }
+
+    // Deduct wallet
+    await client.query(
+      'UPDATE wallets SET balance = balance - $1 WHERE user_id = $2',
+      [wd.amount, wd.user_id]
+    );
+
+    // Record transaction
+    await client.query(
+      `INSERT INTO wallet_transactions (user_id, amount, type, reference, description)
+       VALUES ($1, $2, 'withdrawal_out', $3, $4)`,
+      [wd.user_id, wd.amount, `WD-${id}`, `Withdrawal approved (ID: ${id})`]
+    );
+
+    // Update status
+    await client.query(
+      `UPDATE withdrawal_requests SET status = 'approved', processed_at = NOW() WHERE id = $1`,
+      [id]
+    );
+
+    await client.query('COMMIT');
+
+    // Notify user
+    const userRes = await pool.query('SELECT name, email FROM users WHERE id = $1', [wd.user_id]);
+    if (userRes.rows.length > 0) {
+      sendWithdrawalStatusEmail({
+        to: userRes.rows[0].email,
+        userName: userRes.rows[0].name,
+        amount: wd.amount,
+        status: 'approved',
+        adminNote: null,
+      }).catch(e => console.warn('Withdrawal approval email failed:', e.message));
+    }
+
+    res.json({ message: 'Withdrawal approved and wallet debited' });
+  } catch (err) {
+    await client.query('ROLLBACK');
+    next(err);
+  } finally {
+    client.release();
+  }
+};
+
+// ─────────────────────────────────────────────
+// REJECT WITHDRAWAL
+// ─────────────────────────────────────────────
+const rejectWithdrawal = async (req, res, next) => {
+  try {
+    const { id } = req.params;
+    const { reason = 'Rejected by admin' } = req.body;
+
+    const result = await pool.query(
+      `UPDATE withdrawal_requests
+       SET status = 'rejected', admin_note = $1, processed_at = NOW()
+       WHERE id = $2 AND status = 'pending'
+       RETURNING *`,
+      [reason, id]
+    );
+
+    if (result.rows.length === 0) {
+      return res.status(404).json({ error: 'Request not found or already processed' });
+    }
+
+    const wd = result.rows[0];
+
+    const userRes = await pool.query('SELECT name, email FROM users WHERE id = $1', [wd.user_id]);
+    if (userRes.rows.length > 0) {
+      sendWithdrawalStatusEmail({
+        to: userRes.rows[0].email,
+        userName: userRes.rows[0].name,
+        amount: wd.amount,
+        status: 'rejected',
+        adminNote: reason,
+      }).catch(e => console.warn('Withdrawal rejection email failed:', e.message));
+    }
+
+    res.json({ message: 'Withdrawal rejected', request: wd });
+  } catch (err) { next(err); }
+};
+
 module.exports = {
   getAllDepositRequests,
   updateDepositRequest,
+  getAllWithdrawalRequests,
+  approveWithdrawal,
+  rejectWithdrawal,
 };

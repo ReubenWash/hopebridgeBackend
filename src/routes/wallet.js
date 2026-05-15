@@ -1,5 +1,5 @@
 const router = require('express').Router();
-const { authenticate, requireRole } = require('../middleware/auth');
+const { authenticate } = require('../middleware/auth');
 const upload = require('../middleware/upload');
 const {
   getBalance,
@@ -8,13 +8,33 @@ const {
   getMyDepositRequests,
   uploadProof,
   donateFromWallet,
+  requestWithdrawal,
+  getMyWithdrawals,
+  getWalletSummary,
 } = require('../controllers/walletController');
 
-router.get('/balance', authenticate, getBalance);
-router.get('/transactions', authenticate, getTransactions);
-router.get('/deposit-requests', authenticate, getMyDepositRequests);
-router.post('/deposit-request', authenticate, requestDeposit);
-router.post('/deposit-request/:requestId/proof', authenticate, upload.single('proof'), uploadProof);
-router.post('/donate', authenticate, donateFromWallet);
+// All wallet routes require authentication
+router.use(authenticate);
+
+// Balance & summary
+router.get('/balance',     getBalance);
+router.get('/transactions', getTransactions);
+router.get('/summary',     getWalletSummary);
+
+// Deposit requests
+router.get('/deposit-requests',  getMyDepositRequests);
+router.post('/deposit-request',  requestDeposit);
+router.post(
+  '/deposit-request/:requestId/proof',
+  upload.single('proof'),
+  uploadProof
+);
+
+// Donate from wallet
+router.post('/donate', donateFromWallet);
+
+// Withdrawal
+router.post('/withdrawal', requestWithdrawal);
+router.get('/withdrawals', getMyWithdrawals);
 
 module.exports = router;

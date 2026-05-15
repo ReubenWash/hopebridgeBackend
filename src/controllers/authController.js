@@ -17,27 +17,35 @@ const signToken = (user) =>
     { expiresIn: process.env.JWT_EXPIRES_IN || '7d' }
   );
 
-// Helper to verify reCAPTCHA (secret read from DB)
+// Helper to verify reCAPTCHA (optional – skip if key not configured)
 const verifyRecaptcha = async (token) => {
-  const secret = await getSetting('recaptcha_secret_key');
-  if (!secret) throw new Error('reCAPTCHA secret key not configured in admin settings.');
-  const response = await axios.post(
-    `https://www.google.com/recaptcha/api/siteverify?secret=${secret}&response=${token}`
-  );
-  if (!response.data.success) {
-    throw new Error('reCAPTCHA verification failed. Please try again.');
+  try {
+    const secret = await getSetting('recaptcha_secret_key') || process.env.RECAPTCHA_SECRET;
+    if (!secret) return; // skip if not configured
+    const response = await axios.post(
+      `https://www.google.com/recaptcha/api/siteverify?secret=${secret}&response=${token}`
+    );
+    if (!response.data.success) {
+      throw new Error('reCAPTCHA verification failed. Please try again.');
+    }
+  } catch (err) {
+    if (err.message.includes('reCAPTCHA')) throw err;
+    // Network error etc – skip silently
   }
 };
 
-// POST /api/auth/register – only creators can register
+// POST /api/auth/register – donors and creators can register
 const register = async (req, res, next) => {
   try {
-    const { name, email, password, recaptchaToken } = req.body;
+    const { name, email, password, role = 'donor', recaptchaToken } = req.body;
 
-    if (!recaptchaToken) {
-      return res.status(400).json({ error: 'reCAPTCHA token is required.' });
+    // Only allow donor and creator self-registration
+    const allowedRoles = ['donor', 'creator'];
+    const userRole = allowedRoles.includes(role) ? role : 'donor';
+
+    if (recaptchaToken) {
+      await verifyRecaptcha(recaptchaToken);
     }
-    await verifyRecaptcha(recaptchaToken);
 
     // Check if user already exists
     const exists = await pool.query('SELECT id FROM users WHERE email = $1', [email]);
@@ -46,33 +54,54 @@ const register = async (req, res, next) => {
     }
 
     const hash = await bcrypt.hash(password, 10);
-    const verificationCode = Math.floor(100000 + Math.random() * 900000).toString();
-    const verificationExpires = new Date(Date.now() + 15 * 60 * 1000); // 15 minutes
 
-    // Force role = 'creator' (no donor or admin registration)
+    // Donors are auto-verified; creators need email verification
+    const isVerified = userRole === 'donor';
+    const verificationCode = isVerified ? null : Math.floor(100000 + Math.random() * 900000).toString();
+    const verificationExpires = isVerified ? null : new Date(Date.now() + 15 * 60 * 1000);
+
     const result = await pool.query(
       `INSERT INTO users (name, email, password, role, verification_code, verification_expires, is_verified)
-       VALUES ($1, $2, $3, 'creator', $4, $5, false)
-       RETURNING id, name, email, role, created_at`,
-      [name.trim(), email.toLowerCase().trim(), hash, verificationCode, verificationExpires]
+       VALUES ($1, $2, $3, $4, $5, $6, $7)
+       RETURNING id, name, email, role, is_verified, created_at`,
+      [name.trim(), email.toLowerCase().trim(), hash, userRole, verificationCode, verificationExpires, isVerified]
     );
 
     const user = result.rows[0];
+
+    // Create wallet for new user
+    await pool.query(
+      `INSERT INTO wallets (user_id, balance) VALUES ($1, 0) ON CONFLICT (user_id) DO NOTHING`,
+      [user.id]
+    );
+
     const token = signToken(user);
 
-    // Send verification email
-    sendVerificationEmail({ to: user.email, name: user.name, code: verificationCode })
-      .catch(err => console.warn('Verification email failed:', err.message));
+    // Send verification email for creators
+    if (!isVerified && verificationCode) {
+      sendVerificationEmail({ to: user.email, name: user.name, code: verificationCode })
+        .catch(err => console.warn('Verification email failed:', err.message));
+    }
+
+    const message = userRole === 'donor'
+      ? 'Account created! Welcome to HopeBridge.'
+      : 'Account created! Please check your email for the verification code.';
 
     res.status(201).json({
-      message: 'Account created! Please check your email for the verification code.',
+      message,
       token,
-      user: { id: user.id, name: user.name, email: user.email, role: user.role, isVerified: false },
+      user: {
+        id: user.id,
+        name: user.name,
+        email: user.email,
+        role: user.role,
+        isVerified: user.is_verified,
+      },
     });
   } catch (err) { next(err); }
 };
 
-// POST /api/auth/login – allow verified creators and admins
+// POST /api/auth/login
 const login = async (req, res, next) => {
   try {
     const { email, password } = req.body;
@@ -90,9 +119,13 @@ const login = async (req, res, next) => {
       return res.status(403).json({ error: 'Your account has been deactivated.' });
     }
 
-    // For creators, require email verification
+    // Creators require email verification; donors and admins don't
     if (user.role === 'creator' && !user.is_verified) {
-      return res.status(403).json({ error: 'Please verify your email address before logging in.' });
+      return res.status(403).json({
+        error: 'Please verify your email address before logging in.',
+        needsVerification: true,
+        email: user.email,
+      });
     }
 
     const valid = await bcrypt.compare(password, user.password);
@@ -135,7 +168,7 @@ const updateMe = async (req, res, next) => {
   } catch (err) { next(err); }
 };
 
-// POST /api/auth/verify-code – verify 6‑digit code
+// POST /api/auth/verify-code
 const verifyCode = async (req, res, next) => {
   try {
     const { email, code } = req.body;
@@ -169,9 +202,34 @@ const verifyCode = async (req, res, next) => {
   } catch (err) { next(err); }
 };
 
-// (Optional) Keep the old token‑based verifyEmail for backward compatibility
-const verifyEmail = async (req, res, next) => {
-  // Not used in new flow, but kept for safety
+// POST /api/auth/resend-code
+const resendCode = async (req, res, next) => {
+  try {
+    const { email } = req.body;
+    const result = await pool.query(
+      'SELECT id, name, is_verified FROM users WHERE email = $1',
+      [email.toLowerCase().trim()]
+    );
+    if (result.rows.length === 0) {
+      return res.status(404).json({ error: 'User not found.' });
+    }
+    const user = result.rows[0];
+    if (user.is_verified) {
+      return res.status(400).json({ error: 'Email is already verified.' });
+    }
+    const code = Math.floor(100000 + Math.random() * 900000).toString();
+    const expires = new Date(Date.now() + 15 * 60 * 1000);
+    await pool.query(
+      'UPDATE users SET verification_code = $1, verification_expires = $2 WHERE id = $3',
+      [code, expires, user.id]
+    );
+    sendVerificationEmail({ to: email, name: user.name, code })
+      .catch(err => console.warn('Resend verification email failed:', err.message));
+    res.json({ message: 'Verification code resent.' });
+  } catch (err) { next(err); }
+};
+
+const verifyEmail = async (req, res) => {
   res.status(400).json({ error: 'This endpoint is deprecated. Use /verify-code instead.' });
 };
 
@@ -182,4 +240,5 @@ module.exports = {
   updateMe,
   verifyEmail,
   verifyCode,
+  resendCode,
 };
