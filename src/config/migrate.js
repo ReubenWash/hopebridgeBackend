@@ -198,6 +198,27 @@ const migrate = async (closePool = true) => {
       ALTER TABLE escrow_holds ADD COLUMN IF NOT EXISTS released_at TIMESTAMPTZ;
     `)
 
+    // ✅ FIX: Update deposit_requests constraint to include all statuses (for existing databases)
+    await client.query(`
+      ALTER TABLE deposit_requests DROP CONSTRAINT IF EXISTS deposit_requests_status_check;
+      ALTER TABLE deposit_requests ADD CONSTRAINT deposit_requests_status_check 
+      CHECK (status IN ('pending', 'instructions_sent', 'awaiting_proof', 'approved', 'rejected'));
+    `)
+
+    // ✅ FIX: Update withdrawal_requests constraint
+    await client.query(`
+      ALTER TABLE withdrawal_requests DROP CONSTRAINT IF EXISTS withdrawal_requests_status_check;
+      ALTER TABLE withdrawal_requests ADD CONSTRAINT withdrawal_requests_status_check 
+      CHECK (status IN ('pending', 'approved', 'rejected', 'paid'));
+    `)
+
+    // ✅ FIX: Update donations escrow_status constraint
+    await client.query(`
+      ALTER TABLE donations DROP CONSTRAINT IF EXISTS donations_escrow_status_check;
+      ALTER TABLE donations ADD CONSTRAINT donations_escrow_status_check 
+      CHECK (escrow_status IN ('held', 'released', 'refunded'));
+    `)
+
     // Ensure every existing user has a wallet
     await client.query(`
       INSERT INTO wallets (user_id, balance)
