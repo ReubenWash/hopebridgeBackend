@@ -35,8 +35,9 @@ const updateDepositRequest = async (req, res, next) => {
   try {
     await client.query('BEGIN');
 
+    // Lock the row to prevent race conditions
     const beforeUpdate = await client.query(
-      'SELECT * FROM deposit_requests WHERE id = $1',
+      'SELECT * FROM deposit_requests WHERE id = $1 FOR UPDATE',
       [id]
     );
     if (beforeUpdate.rows.length === 0) {
@@ -46,35 +47,79 @@ const updateDepositRequest = async (req, res, next) => {
 
     const existing = beforeUpdate.rows[0];
 
-    // Build update
-    const result = await client.query(
-      `UPDATE deposit_requests
-       SET status = COALESCE($1, status),
-           admin_instructions = COALESCE($2, admin_instructions),
-           payment_method = COALESCE($3, payment_method),
-           payment_details = COALESCE($4, payment_details),
-           admin_notes = COALESCE($5, admin_notes),
-           processed_at = CASE WHEN $1 IN ('approved','rejected') THEN NOW() ELSE processed_at END
-       WHERE id = $6
-       RETURNING *`,
-      [status || null, admin_instructions || null, payment_method || null, payment_details || null, admin_notes || null, id]
-    );
+    // ✅ Prevent multiple approvals/rejections
+    if (existing.status === 'approved') {
+      await client.query('ROLLBACK');
+      return res.status(400).json({ error: 'Deposit request already approved' });
+    }
+    if (existing.status === 'rejected') {
+      await client.query('ROLLBACK');
+      return res.status(400).json({ error: 'Deposit request already rejected' });
+    }
+
+    // ✅ Prevent approving without instructions being sent first
+    if (status === 'approved' && existing.status !== 'awaiting_proof') {
+      await client.query('ROLLBACK');
+      return res.status(400).json({ error: 'Cannot approve: proof has not been uploaded yet' });
+    }
+
+    // ✅ Prevent sending instructions if already approved/rejected
+    if (status === 'instructions_sent' && (existing.status === 'approved' || existing.status === 'rejected')) {
+      await client.query('ROLLBACK');
+      return res.status(400).json({ error: 'Cannot send instructions for already processed request' });
+    }
+
+    // Build update query
+    let updateQuery = `
+      UPDATE deposit_requests
+      SET 
+        status = COALESCE($1, status),
+        admin_instructions = COALESCE($2, admin_instructions),
+        payment_method = COALESCE($3, payment_method),
+        payment_details = COALESCE($4, payment_details),
+        admin_notes = COALESCE($5, admin_notes),
+        processed_at = CASE 
+          WHEN $1 IN ('approved','rejected') THEN NOW() 
+          ELSE processed_at 
+        END
+      WHERE id = $6
+      RETURNING *
+    `;
+
+    const result = await client.query(updateQuery, [
+      status || null, 
+      admin_instructions || null, 
+      payment_method || null, 
+      payment_details || null, 
+      admin_notes || null, 
+      id
+    ]);
 
     const request = result.rows[0];
 
-    // On approval: credit wallet
-    if (status === 'approved') {
-      await client.query(
-        `INSERT INTO wallets (user_id, balance) VALUES ($1, $2)
-         ON CONFLICT (user_id) DO UPDATE SET balance = wallets.balance + $2`,
-        [existing.user_id, existing.amount]
+    // ✅ On approval: credit wallet (with duplicate check)
+    if (status === 'approved' && existing.status !== 'approved') {
+      // Check if already credited to prevent double credit
+      const existingCredit = await client.query(
+        'SELECT id FROM wallet_transactions WHERE reference = $1 AND type = $2',
+        [`DEP-${id}`, 'deposit']
       );
+      
+      if (existingCredit.rows.length === 0) {
+        // Create or update wallet
+        await client.query(
+          `INSERT INTO wallets (user_id, balance) VALUES ($1, $2)
+           ON CONFLICT (user_id) DO UPDATE SET balance = wallets.balance + $2`,
+          [existing.user_id, existing.amount]
+        );
 
-      await client.query(
-        `INSERT INTO wallet_transactions (user_id, amount, type, reference, description)
-         VALUES ($1, $2, 'deposit', $3, $4)`,
-        [existing.user_id, existing.amount, `DEP-${id}`, `Deposit request #${id} approved`]
-      );
+        // Record transaction
+        await client.query(
+          `INSERT INTO wallet_transactions (user_id, amount, type, reference, description)
+           VALUES ($1, $2, 'deposit', $3, $4)`,
+          [existing.user_id, existing.amount, `DEP-${id}`, `Deposit request #${id} approved`]
+        );
+      }
     }
 
     await client.query('COMMIT');
@@ -84,17 +129,25 @@ const updateDepositRequest = async (req, res, next) => {
     if (userRes.rows.length > 0) {
       const user = userRes.rows[0];
 
-      if (status === 'approved' || status === 'rejected') {
+      if (status === 'approved') {
         sendDepositStatusEmail({
           to: user.email,
           userName: user.name,
           amount: existing.amount,
-          status,
+          status: 'approved',
+          adminNote: admin_notes || null,
+          requestId: id,
+        }).catch(e => console.warn('Deposit status email failed:', e.message));
+      } else if (status === 'rejected') {
+        sendDepositStatusEmail({
+          to: user.email,
+          userName: user.name,
+          amount: existing.amount,
+          status: 'rejected',
           adminNote: admin_notes || null,
           requestId: id,
         }).catch(e => console.warn('Deposit status email failed:', e.message));
       } else if (status === 'instructions_sent' && admin_instructions) {
-        // Notify user that instructions are available
         sendDepositStatusEmail({
           to: user.email,
           userName: user.name,
@@ -143,6 +196,7 @@ const approveWithdrawal = async (req, res, next) => {
 
     await client.query('BEGIN');
 
+    // Lock row to prevent race conditions
     const wdRes = await client.query(
       'SELECT * FROM withdrawal_requests WHERE id = $1 FOR UPDATE',
       [id]
@@ -153,6 +207,8 @@ const approveWithdrawal = async (req, res, next) => {
     }
 
     const wd = wdRes.rows[0];
+    
+    // ✅ Prevent multiple approvals
     if (wd.status !== 'pending') {
       await client.query('ROLLBACK');
       return res.status(400).json({ error: 'Request already processed' });
@@ -171,7 +227,7 @@ const approveWithdrawal = async (req, res, next) => {
 
     // Deduct wallet
     await client.query(
-      'UPDATE wallets SET balance = balance - $1 WHERE user_id = $2',
+      'UPDATE wallets SET balance = balance - $1, updated_at = NOW() WHERE user_id = $2',
       [wd.amount, wd.user_id]
     );
 
@@ -179,10 +235,10 @@ const approveWithdrawal = async (req, res, next) => {
     await client.query(
       `INSERT INTO wallet_transactions (user_id, amount, type, reference, description)
        VALUES ($1, $2, 'withdrawal_out', $3, $4)`,
-      [wd.user_id, wd.amount, `WD-${id}`, `Withdrawal approved (ID: ${id})`]
+      [wd.user_id, -wd.amount, `WD-${id}`, `Withdrawal approved (ID: ${id})`]
     );
 
-    // Update status
+    // Update status to approved
     await client.query(
       `UPDATE withdrawal_requests SET status = 'approved', processed_at = NOW() WHERE id = $1`,
       [id]
@@ -218,6 +274,20 @@ const rejectWithdrawal = async (req, res, next) => {
   try {
     const { id } = req.params;
     const { reason = 'Rejected by admin' } = req.body;
+
+    // First check if already processed
+    const checkRes = await pool.query(
+      'SELECT status FROM withdrawal_requests WHERE id = $1',
+      [id]
+    );
+    
+    if (checkRes.rows.length === 0) {
+      return res.status(404).json({ error: 'Request not found' });
+    }
+    
+    if (checkRes.rows[0].status !== 'pending') {
+      return res.status(400).json({ error: 'Request already processed' });
+    }
 
     const result = await pool.query(
       `UPDATE withdrawal_requests
