@@ -192,4 +192,4 @@ runMigrations().then(() => {
   process.exit(1)
 })
 
-module.exports = ap
+module.exports = app
