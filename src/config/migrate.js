@@ -135,7 +135,7 @@ const migrate = async (closePool = true) => {
         created_at TIMESTAMPTZ DEFAULT NOW()
       );
 
-      -- SETTINGS
+      -- SETTINGS (removed PayPal/Firebase, added Cloudinary)
       CREATE TABLE IF NOT EXISTS settings (
         id SERIAL PRIMARY KEY,
         key VARCHAR(100) UNIQUE NOT NULL,
@@ -196,23 +196,62 @@ const migrate = async (closePool = true) => {
       ALTER TABLE withdrawal_requests ADD COLUMN IF NOT EXISTS processed_at TIMESTAMPTZ;
       ALTER TABLE escrow_holds ADD COLUMN IF NOT EXISTS held_at TIMESTAMPTZ DEFAULT NOW();
       ALTER TABLE escrow_holds ADD COLUMN IF NOT EXISTS released_at TIMESTAMPTZ;
+      ALTER TABLE escrow_holds ADD COLUMN IF NOT EXISTS created_at TIMESTAMPTZ DEFAULT NOW();
     `)
 
-    // ✅ FIX: Update deposit_requests constraint to include all statuses (for existing databases)
+    // ✅ FORCE FIX: Rename user_id to donor_id in escrow_holds if it exists
+    await client.query(`
+      DO $$ 
+      BEGIN
+        IF EXISTS (SELECT 1 FROM information_schema.columns 
+                   WHERE table_name = 'escrow_holds' AND column_name = 'user_id') THEN
+          ALTER TABLE escrow_holds RENAME COLUMN user_id TO donor_id;
+        END IF;
+      END $$;
+    `)
+
+    // ✅ FORCE FIX: Ensure donor_id column exists (add if missing)
+    await client.query(`
+      ALTER TABLE escrow_holds ADD COLUMN IF NOT EXISTS donor_id INTEGER REFERENCES users(id) ON DELETE CASCADE;
+    `)
+
+    // ✅ Insert default Cloudinary settings (remove PayPal/Firebase)
+    await client.query(`
+      INSERT INTO settings (key, value) VALUES 
+        ('cloudinary_cloud_name', ''),
+        ('cloudinary_api_key', ''),
+        ('cloudinary_api_secret', ''),
+        ('smtp_host', ''),
+        ('smtp_port', ''),
+        ('smtp_user', ''),
+        ('smtp_pass', ''),
+        ('recaptcha_site_key', ''),
+        ('recaptcha_secret_key', '')
+      ON CONFLICT (key) DO NOTHING;
+    `)
+
+    // ✅ Remove old PayPal/Firebase settings if they exist (cleanup)
+    await client.query(`
+      DELETE FROM settings WHERE key IN (
+        'paypal_client_id', 'paypal_client_secret', 'paypal_mode', 'firebase_config'
+      );
+    `)
+
+    // ✅ Update deposit_requests constraint to include all statuses
     await client.query(`
       ALTER TABLE deposit_requests DROP CONSTRAINT IF EXISTS deposit_requests_status_check;
       ALTER TABLE deposit_requests ADD CONSTRAINT deposit_requests_status_check 
       CHECK (status IN ('pending', 'instructions_sent', 'awaiting_proof', 'approved', 'rejected'));
     `)
 
-    // ✅ FIX: Update withdrawal_requests constraint
+    // ✅ Update withdrawal_requests constraint
     await client.query(`
       ALTER TABLE withdrawal_requests DROP CONSTRAINT IF EXISTS withdrawal_requests_status_check;
       ALTER TABLE withdrawal_requests ADD CONSTRAINT withdrawal_requests_status_check 
       CHECK (status IN ('pending', 'approved', 'rejected', 'paid'));
     `)
 
-    // ✅ FIX: Update donations escrow_status constraint
+    // ✅ Update donations escrow_status constraint
     await client.query(`
       ALTER TABLE donations DROP CONSTRAINT IF EXISTS donations_escrow_status_check;
       ALTER TABLE donations ADD CONSTRAINT donations_escrow_status_check 
@@ -258,6 +297,8 @@ const migrate = async (closePool = true) => {
     `)
 
     console.log('✅ Migrations completed successfully')
+    console.log('📁 Cloudinary storage configured')
+    console.log('🗑️ Removed PayPal and Firebase settings')
 
   } catch (err) {
     console.error('❌ Migration failed:', err.message)
