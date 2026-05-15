@@ -186,6 +186,8 @@ const migrate = async (closePool = true) => {
       ALTER TABLE donations ADD COLUMN IF NOT EXISTS payment_reference VARCHAR(255);
       ALTER TABLE creator_payment_methods ADD COLUMN IF NOT EXISTS paypal_email TEXT;
       ALTER TABLE wallet_transactions ADD COLUMN IF NOT EXISTS reference_id INTEGER;
+      ALTER TABLE wallet_transactions ADD COLUMN IF NOT EXISTS reference VARCHAR(255);
+      ALTER TABLE wallet_transactions ADD COLUMN IF NOT EXISTS description TEXT;
 
       -- ✅ ADD MISSING processed_at COLUMNS (fixes admin payment details error)
       ALTER TABLE deposit_requests ADD COLUMN IF NOT EXISTS processed_at TIMESTAMPTZ;
