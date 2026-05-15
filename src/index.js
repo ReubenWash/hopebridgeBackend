@@ -20,6 +20,10 @@ const { migrate } = require('./config/migrate')
 const pool = require('./config/db')
 
 const app = express()
+
+// ✅ FIX: Trust Vercel's proxy (fixes express-rate-limit validation error)
+app.set('trust proxy', 1)   // or 'true' – both work for Vercel
+
 const PORT = process.env.PORT || 5000
 const isDev = (process.env.NODE_ENV || 'development') === 'development'
 
