@@ -33,15 +33,41 @@ if (isCloudinaryConfigured()) {
   // Safe require inside the if-block so a missing package never crashes startup
   let CloudinaryStorage;
   try {
-    ({ CloudinaryStorage } = require('multer-storage-cloudinary'));
+    const cloudinaryStorage = require('multer-storage-cloudinary');
+    CloudinaryStorage = cloudinaryStorage.CloudinaryStorage;
   } catch (e) {
     console.error('❌ multer-storage-cloudinary not installed:', e.message);
     console.warn('   Run: npm install multer-storage-cloudinary');
-    process.exit(1);
+    // Fall back to local storage instead of crashing
+    const fs = require('fs');
+    const uploadDir = process.env.UPLOAD_DIR || 'uploads';
+    if (!fs.existsSync(uploadDir)) fs.mkdirSync(uploadDir, { recursive: true });
+    
+    storage = multer.diskStorage({
+      destination: (req, file, cb) => cb(null, uploadDir),
+      filename: (req, file, cb) => {
+        const ext = path.extname(file.originalname).toLowerCase();
+        cb(null, `${uuidv4()}${ext}`);
+      },
+    });
+    
+    // Skip the rest of the cloudinary setup
+    const fileFilter = (req, file, cb) => {
+      const allowedMimeTypes = ['image/jpeg', 'image/jpg', 'image/png', 'image/webp', 'application/pdf'];
+      if (allowedMimeTypes.includes(file.mimetype)) {
+        cb(null, true);
+      } else {
+        cb(new Error('Only JPG, PNG, WebP images, and PDF files are allowed.'));
+      }
+    };
+    
+    const upload = multer({ storage, fileFilter, limits: { fileSize: 10 * 1024 * 1024 } });
+    module.exports = upload;
+    return;
   }
 
   storage = new CloudinaryStorage({
-    cloudinary,
+    cloudinary: cloudinary,
     params: async (req, file) => {
       let folder = 'hopebridge';
       if (req.originalUrl.includes('/campaigns')) {
