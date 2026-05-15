@@ -186,6 +186,10 @@ const migrate = async (closePool = true) => {
       ALTER TABLE donations ADD COLUMN IF NOT EXISTS payment_reference VARCHAR(255);
       ALTER TABLE creator_payment_methods ADD COLUMN IF NOT EXISTS paypal_email TEXT;
       ALTER TABLE wallet_transactions ADD COLUMN IF NOT EXISTS reference_id INTEGER;
+
+      -- ✅ ADD MISSING processed_at COLUMNS (fixes admin payment details error)
+      ALTER TABLE deposit_requests ADD COLUMN IF NOT EXISTS processed_at TIMESTAMPTZ;
+      ALTER TABLE withdrawal_requests ADD COLUMN IF NOT EXISTS processed_at TIMESTAMPTZ;
     `)
 
     // Ensure every existing user has a wallet
@@ -219,7 +223,7 @@ const migrate = async (closePool = true) => {
       ON CONFLICT (email) DO NOTHING
     `, [donorHash])
 
-    // Ensure all users have wallets
+    // Ensure all users have wallets (again, for new users)
     await client.query(`
       INSERT INTO wallets (user_id, balance)
       SELECT id, 0 FROM users
