@@ -3,6 +3,7 @@ const { body } = require('express-validator')
 const {
   getAllCampaigns, getCampaign, createCampaign,
   updateCampaign, deleteCampaign, getMyCampaigns,
+  requestCampaignCompletion,          // <-- new: creator requests completion
 } = require('../controllers/campaignController')
 const { authenticate, requireCreator } = require('../middleware/auth')
 const { validate } = require('../middleware/errorHandler')
@@ -33,5 +34,8 @@ router.patch('/:id',
   updateCampaign
 )
 router.delete('/:id', authenticate, requireCreator, deleteCampaign)
+
+// Creator requests campaign completion (escrow release)
+router.post('/:id/complete-request', authenticate, requireCreator, requestCampaignCompletion)
 
 module.exports = router

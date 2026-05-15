@@ -232,8 +232,242 @@ const adminUpdateStatus = async (req, res, next) => {
   } catch (err) { next(err) }
 }
 
+// ========== ESCROW & COMPLETION REQUESTS (Step 6) ==========
+
+// Creator requests to complete a campaign (release escrow)
+const requestCampaignCompletion = async (req, res, next) => {
+  const { id } = req.params;
+  const userId = req.user.id;
+
+  try {
+    // Verify campaign belongs to this creator
+    const campRes = await pool.query(
+      'SELECT id, creator_id, status FROM campaigns WHERE id = $1 AND creator_id = $2',
+      [id, userId]
+    );
+    if (campRes.rows.length === 0) {
+      return res.status(404).json({ error: 'Campaign not found or not yours' });
+    }
+    if (campRes.rows[0].status !== 'approved') {
+      return res.status(400).json({ error: 'Only approved campaigns can be completed' });
+    }
+
+    // Add columns if not exist (safe, idempotent)
+    await pool.query(
+      `ALTER TABLE campaigns ADD COLUMN IF NOT EXISTS completion_requested BOOLEAN DEFAULT FALSE;
+       ALTER TABLE campaigns ADD COLUMN IF NOT EXISTS completion_requested_at TIMESTAMPTZ;`
+    );
+
+    await pool.query(
+      `UPDATE campaigns
+       SET completion_requested = TRUE, completion_requested_at = NOW()
+       WHERE id = $1`,
+      [id]
+    );
+
+    // Notify admin
+    const adminRes = await pool.query("SELECT email FROM users WHERE role = 'admin' LIMIT 1");
+    if (adminRes.rows.length > 0) {
+      // Optional: send email
+      console.log(`Admin notified: Campaign ${id} completion requested by user ${userId}`);
+    }
+
+    res.json({ message: 'Completion request sent to admin. Funds will be released after review.' });
+  } catch (err) {
+    next(err);
+  }
+};
+
+// Admin releases escrow for a campaign (after verification)
+const adminReleaseCampaignEscrow = async (req, res, next) => {
+  const { id } = req.params; // campaign id
+  const client = await pool.connect();
+
+  try {
+    await client.query('BEGIN');
+
+    // Get all held escrow records for this campaign
+    const escrows = await client.query(
+      `SELECT eh.*, d.donor_id
+       FROM escrow_holds eh
+       JOIN donations d ON eh.donation_id = d.id
+       WHERE eh.campaign_id = $1 AND eh.status = 'held'`,
+      [id]
+    );
+
+    if (escrows.rows.length === 0) {
+      await client.query('ROLLBACK');
+      return res.status(404).json({ error: 'No held escrow found for this campaign' });
+    }
+
+    // Get campaign details
+    const campRes = await client.query(
+      'SELECT id, title, creator_id FROM campaigns WHERE id = $1',
+      [id]
+    );
+    if (campRes.rows.length === 0) {
+      await client.query('ROLLBACK');
+      return res.status(404).json({ error: 'Campaign not found' });
+    }
+    const campaign = campRes.rows[0];
+    const creatorId = campaign.creator_id;
+
+    let totalReleased = 0;
+
+    for (const escrow of escrows.rows) {
+      // Credit creator wallet
+      await client.query(
+        `INSERT INTO wallets (user_id, balance) VALUES ($1, $2)
+         ON CONFLICT (user_id) DO UPDATE SET balance = wallets.balance + $2`,
+        [creatorId, escrow.amount]
+      );
+
+      // Transaction for creator
+      await client.query(
+        `INSERT INTO wallet_transactions (user_id, amount, type, reference_id, description)
+         VALUES ($1, $2, 'escrow_release', $3, $4)`,
+        [creatorId, escrow.amount, escrow.id, `Escrow release for campaign "${campaign.title}"`]
+      );
+
+      // Update escrow hold status
+      await client.query(
+        `UPDATE escrow_holds SET status = 'released', released_at = NOW() WHERE id = $1`,
+        [escrow.id]
+      );
+
+      // Update donation escrow_status
+      await client.query(
+        `UPDATE donations SET escrow_status = 'released' WHERE id = $1`,
+        [escrow.donation_id]
+      );
+
+      totalReleased += parseFloat(escrow.amount);
+    }
+
+    // Update campaign raised amount (add total released)
+    await client.query(
+      `UPDATE campaigns SET raised = raised + $1, status = 'completed' WHERE id = $2`,
+      [totalReleased, id]
+    );
+
+    // Remove completion request flag
+    await client.query(
+      `UPDATE campaigns SET completion_requested = FALSE WHERE id = $1`,
+      [id]
+    );
+
+    await client.query('COMMIT');
+
+    res.json({
+      message: `Released $${totalReleased.toFixed(2)} to creator for campaign "${campaign.title}"`,
+      totalReleased,
+    });
+  } catch (err) {
+    await client.query('ROLLBACK');
+    next(err);
+  } finally {
+    client.release();
+  }
+};
+
+// Admin refunds all escrow for a cancelled campaign
+const adminRefundCampaignEscrow = async (req, res, next) => {
+  const { id } = req.params;
+  const client = await pool.connect();
+
+  try {
+    await client.query('BEGIN');
+
+    const escrows = await client.query(
+      `SELECT eh.*, d.donor_id
+       FROM escrow_holds eh
+       JOIN donations d ON eh.donation_id = d.id
+       WHERE eh.campaign_id = $1 AND eh.status = 'held'`,
+      [id]
+    );
+
+    if (escrows.rows.length === 0) {
+      await client.query('ROLLBACK');
+      return res.status(404).json({ error: 'No held escrow found for this campaign' });
+    }
+
+    const campRes = await client.query(
+      'SELECT title FROM campaigns WHERE id = $1',
+      [id]
+    );
+    const campaignTitle = campRes.rows[0]?.title || 'Campaign';
+
+    for (const escrow of escrows.rows) {
+      // Refund donor
+      await client.query(
+        `INSERT INTO wallets (user_id, balance) VALUES ($1, $2)
+         ON CONFLICT (user_id) DO UPDATE SET balance = wallets.balance + $2`,
+        [escrow.donor_id, escrow.amount]
+      );
+
+      await client.query(
+        `INSERT INTO wallet_transactions (user_id, amount, type, reference_id, description)
+         VALUES ($1, $2, 'escrow_refund', $3, $4)`,
+        [escrow.donor_id, escrow.amount, escrow.id, `Refund for cancelled campaign "${campaignTitle}"`]
+      );
+
+      await client.query(
+        `UPDATE escrow_holds SET status = 'refunded', released_at = NOW() WHERE id = $1`,
+        [escrow.id]
+      );
+
+      await client.query(
+        `UPDATE donations SET escrow_status = 'refunded' WHERE id = $1`,
+        [escrow.donation_id]
+      );
+    }
+
+    // Update campaign status to cancelled
+    await client.query(
+      `UPDATE campaigns SET status = 'rejected' WHERE id = $1`,
+      [id]
+    );
+
+    await client.query('COMMIT');
+
+    res.json({
+      message: `Refunded all escrow for campaign "${campaignTitle}"`,
+    });
+  } catch (err) {
+    await client.query('ROLLBACK');
+    next(err);
+  } finally {
+    client.release();
+  }
+};
+
+// Get all campaigns with pending completion requests (admin)
+const getCompletionRequests = async (req, res, next) => {
+  try {
+    const result = await pool.query(
+      `SELECT id, title, creator_id, completion_requested_at
+       FROM campaigns
+       WHERE completion_requested = TRUE AND status = 'approved'
+       ORDER BY completion_requested_at ASC`
+    );
+    res.json({ campaigns: result.rows });
+  } catch (err) {
+    next(err);
+  }
+};
+
 module.exports = {
-  getAllCampaigns, getCampaign, createCampaign,
-  updateCampaign, deleteCampaign, getMyCampaigns,
-  adminGetAllCampaigns, adminUpdateStatus,
-}
+  getAllCampaigns,
+  getCampaign,
+  createCampaign,
+  updateCampaign,
+  deleteCampaign,
+  getMyCampaigns,
+  adminGetAllCampaigns,
+  adminUpdateStatus,
+  // Escrow & completion
+  requestCampaignCompletion,
+  adminReleaseCampaignEscrow,
+  adminRefundCampaignEscrow,
+  getCompletionRequests,
+};

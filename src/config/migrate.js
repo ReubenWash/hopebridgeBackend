@@ -54,6 +54,8 @@ const migrate = async (closePool = true) => {
         is_monthly BOOLEAN DEFAULT false,
         payment_method VARCHAR(20) DEFAULT 'card',
         payment_reference VARCHAR(255) UNIQUE,
+        escrow_status VARCHAR(20) DEFAULT 'held'
+          CHECK (escrow_status IN ('held','released','refunded')),
         created_at TIMESTAMPTZ DEFAULT NOW()
       );
 
@@ -122,12 +124,13 @@ const migrate = async (closePool = true) => {
       -- ESCROW HOLDS
       CREATE TABLE IF NOT EXISTS escrow_holds (
         id SERIAL PRIMARY KEY,
-        user_id INTEGER REFERENCES users(id) ON DELETE CASCADE,
+        donor_id INTEGER REFERENCES users(id) ON DELETE CASCADE,
         campaign_id INTEGER REFERENCES campaigns(id) ON DELETE CASCADE,
         donation_id INTEGER REFERENCES donations(id) ON DELETE CASCADE,
         amount NUMERIC(12,2) NOT NULL CHECK (amount > 0),
         status VARCHAR(20) DEFAULT 'held'
           CHECK (status IN ('held','released','refunded','cancelled')),
+        held_at TIMESTAMPTZ DEFAULT NOW(),
         released_at TIMESTAMPTZ,
         created_at TIMESTAMPTZ DEFAULT NOW()
       );
@@ -184,14 +187,15 @@ const migrate = async (closePool = true) => {
       ALTER TABLE users ADD COLUMN IF NOT EXISTS verification_expires TIMESTAMPTZ;
       ALTER TABLE donations ADD COLUMN IF NOT EXISTS donor_id INTEGER REFERENCES users(id) ON DELETE SET NULL;
       ALTER TABLE donations ADD COLUMN IF NOT EXISTS payment_reference VARCHAR(255);
+      ALTER TABLE donations ADD COLUMN IF NOT EXISTS escrow_status VARCHAR(20) DEFAULT 'held';
       ALTER TABLE creator_payment_methods ADD COLUMN IF NOT EXISTS paypal_email TEXT;
       ALTER TABLE wallet_transactions ADD COLUMN IF NOT EXISTS reference_id INTEGER;
       ALTER TABLE wallet_transactions ADD COLUMN IF NOT EXISTS reference VARCHAR(255);
       ALTER TABLE wallet_transactions ADD COLUMN IF NOT EXISTS description TEXT;
-
-      -- ✅ ADD MISSING processed_at COLUMNS (fixes admin payment details error)
       ALTER TABLE deposit_requests ADD COLUMN IF NOT EXISTS processed_at TIMESTAMPTZ;
       ALTER TABLE withdrawal_requests ADD COLUMN IF NOT EXISTS processed_at TIMESTAMPTZ;
+      ALTER TABLE escrow_holds ADD COLUMN IF NOT EXISTS held_at TIMESTAMPTZ DEFAULT NOW();
+      ALTER TABLE escrow_holds ADD COLUMN IF NOT EXISTS released_at TIMESTAMPTZ;
     `)
 
     // Ensure every existing user has a wallet

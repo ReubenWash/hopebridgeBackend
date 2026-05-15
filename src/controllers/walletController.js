@@ -160,7 +160,7 @@ const uploadProof = async (req, res, next) => {
 };
 
 // ─────────────────────────────────────────────
-// DONATE FROM WALLET (WITH OPTIONAL ESCROW)
+// DONATE FROM WALLET (MANDATORY ESCROW)
 // ─────────────────────────────────────────────
 const donateFromWallet = async (req, res, next) => {
   const client = await pool.connect();
@@ -173,7 +173,6 @@ const donateFromWallet = async (req, res, next) => {
       donor_email,
       message,
       is_monthly,
-      use_escrow = false,
     } = req.body;
 
     if (!campaign_id || !amount || parseFloat(amount) <= 0) {
@@ -188,7 +187,10 @@ const donateFromWallet = async (req, res, next) => {
       [req.user.id]
     );
 
-    if (wallet.rows.length === 0) throw new Error('Wallet not found');
+    if (wallet.rows.length === 0) {
+      await client.query('ROLLBACK');
+      return res.status(404).json({ error: 'Wallet not found' });
+    }
 
     const currentBalance = parseFloat(wallet.rows[0].balance);
     const donationAmount = parseFloat(amount);
@@ -202,7 +204,7 @@ const donateFromWallet = async (req, res, next) => {
 
     // Verify campaign
     const campRes = await client.query(
-      'SELECT id, title, status FROM campaigns WHERE id = $1',
+      'SELECT id, title, status, creator_id FROM campaigns WHERE id = $1',
       [campaign_id]
     );
     if (!campRes.rows.length) {
@@ -216,15 +218,15 @@ const donateFromWallet = async (req, res, next) => {
 
     // Deduct balance
     await client.query(
-      'UPDATE wallets SET balance = balance - $1 WHERE user_id = $2',
+      'UPDATE wallets SET balance = balance - $1, updated_at = NOW() WHERE user_id = $2',
       [donationAmount, req.user.id]
     );
 
-    // Create donation record
+    // Create donation record with escrow_status = 'held'
     const donation = await client.query(
       `INSERT INTO donations
-       (campaign_id, donor_id, donor_name, donor_email, amount, message, is_monthly, payment_method)
-       VALUES ($1, $2, $3, $4, $5, $6, $7, 'wallet')
+       (campaign_id, donor_id, donor_name, donor_email, amount, message, is_monthly, payment_method, escrow_status)
+       VALUES ($1, $2, $3, $4, $5, $6, $7, 'wallet', 'held')
        RETURNING *`,
       [
         campaign_id,
@@ -239,39 +241,31 @@ const donateFromWallet = async (req, res, next) => {
 
     const donationRow = donation.rows[0];
 
-    // Update campaign raised total
-    await client.query(
-      `UPDATE campaigns
-       SET raised = (SELECT COALESCE(SUM(amount), 0) FROM donations WHERE campaign_id = $1)
-       WHERE id = $1`,
-      [campaign_id]
-    );
-
-    // Wallet transaction ledger entry
+    // Wallet transaction ledger entry (donation_out)
     await client.query(
       `INSERT INTO wallet_transactions
        (user_id, amount, type, reference_id, description)
        VALUES ($1, $2, 'donation_out', $3, $4)`,
       [
         req.user.id,
-        donationAmount,
+        -donationAmount,  // negative because money leaves wallet
         donationRow.id,
-        `Donation to "${campRes.rows[0].title}"`,
+        `Donation to "${campRes.rows[0].title}" (held in escrow)`,
       ]
     );
 
-    // Optional escrow hold
-    if (use_escrow) {
-      await client.query(
-        `INSERT INTO escrow_holds (user_id, campaign_id, donation_id, amount, status)
-         VALUES ($1, $2, $3, $4, 'held')`,
-        [req.user.id, campaign_id, donationRow.id, donationAmount]
-      );
-    }
+    // Create escrow hold record (note: column is donor_id, not user_id)
+    await client.query(
+      `INSERT INTO escrow_holds (donor_id, campaign_id, donation_id, amount, status, held_at)
+       VALUES ($1, $2, $3, $4, 'held', NOW())`,
+      [req.user.id, campaign_id, donationRow.id, donationAmount]
+    );
+
+    // DO NOT update campaign raised yet – that happens only when escrow is released
 
     await client.query('COMMIT');
 
-    // Send admin alert
+    // Send admin alert (optional)
     const adminRes = await pool.query("SELECT email FROM users WHERE role = 'admin' LIMIT 1");
     if (adminRes.rows.length > 0) {
       sendNewDonationAdminAlert({
@@ -280,12 +274,12 @@ const donateFromWallet = async (req, res, next) => {
         amount: donationAmount,
         campaignTitle: campRes.rows[0].title,
         campaignId: campaign_id,
-        paymentMethod: 'Wallet',
+        paymentMethod: 'Wallet (Escrow)',
       }).catch(e => console.warn('Admin wallet donation alert failed:', e.message));
     }
 
     res.status(201).json({
-      message: `Donation of $${donationAmount.toFixed(2)} completed!`,
+      message: `Donation of $${donationAmount.toFixed(2)} held in escrow. Funds will be released when the campaign is completed.`,
       donation: donationRow,
       new_balance: currentBalance - donationAmount,
     });
@@ -380,7 +374,7 @@ const getMyWithdrawals = async (req, res, next) => {
 };
 
 // ─────────────────────────────────────────────
-// ESCROW: RELEASE FUNDS (admin or auto)
+// ESCROW: RELEASE FUNDS TO CREATOR (admin only)
 // ─────────────────────────────────────────────
 const releaseEscrow = async (req, res, next) => {
   const client = await pool.connect();
@@ -389,6 +383,7 @@ const releaseEscrow = async (req, res, next) => {
 
     await client.query('BEGIN');
 
+    // Lock escrow hold
     const escrow = await client.query(
       'SELECT * FROM escrow_holds WHERE id = $1 AND status = $2 FOR UPDATE',
       [escrow_id, 'held']
@@ -401,36 +396,54 @@ const releaseEscrow = async (req, res, next) => {
 
     const hold = escrow.rows[0];
 
-    // Mark as released
-    await client.query(
-      `UPDATE escrow_holds SET status = 'released', released_at = NOW() WHERE id = $1`,
-      [escrow_id]
-    );
-
     // Get campaign creator
     const campRes = await client.query(
       'SELECT creator_id, title FROM campaigns WHERE id = $1',
       [hold.campaign_id]
     );
 
-    if (campRes.rows.length > 0) {
-      // Credit creator wallet
-      await client.query(
-        `INSERT INTO wallets (user_id, balance) VALUES ($1, $2)
-         ON CONFLICT (user_id) DO UPDATE SET balance = wallets.balance + $2`,
-        [campRes.rows[0].creator_id, hold.amount]
-      );
-
-      await client.query(
-        `INSERT INTO wallet_transactions (user_id, amount, type, reference_id, description)
-         VALUES ($1, $2, 'escrow_release', $3, $4)`,
-        [campRes.rows[0].creator_id, hold.amount, hold.id, `Escrow release for "${campRes.rows[0].title}"`]
-      );
+    if (campRes.rows.length === 0) {
+      await client.query('ROLLBACK');
+      return res.status(404).json({ error: 'Campaign not found' });
     }
+
+    const creatorId = campRes.rows[0].creator_id;
+
+    // Credit creator wallet
+    await client.query(
+      `INSERT INTO wallets (user_id, balance) VALUES ($1, $2)
+       ON CONFLICT (user_id) DO UPDATE SET balance = wallets.balance + $2`,
+      [creatorId, hold.amount]
+    );
+
+    // Record transaction for creator
+    await client.query(
+      `INSERT INTO wallet_transactions (user_id, amount, type, reference_id, description)
+       VALUES ($1, $2, 'escrow_release', $3, $4)`,
+      [creatorId, hold.amount, hold.id, `Escrow release for "${campRes.rows[0].title}"`]
+    );
+
+    // Update escrow status
+    await client.query(
+      `UPDATE escrow_holds SET status = 'released', released_at = NOW() WHERE id = $1`,
+      [escrow_id]
+    );
+
+    // Update donation escrow_status
+    await client.query(
+      `UPDATE donations SET escrow_status = 'released' WHERE id = $1`,
+      [hold.donation_id]
+    );
+
+    // Update campaign raised amount (add released amount)
+    await client.query(
+      `UPDATE campaigns SET raised = raised + $1 WHERE id = $2`,
+      [hold.amount, hold.campaign_id]
+    );
 
     await client.query('COMMIT');
 
-    res.json({ message: 'Escrow released to campaign creator' });
+    res.json({ message: 'Escrow released to campaign creator', amount: hold.amount });
   } catch (err) {
     await client.query('ROLLBACK');
     next(err);
@@ -440,7 +453,7 @@ const releaseEscrow = async (req, res, next) => {
 };
 
 // ─────────────────────────────────────────────
-// ESCROW: REFUND TO DONOR
+// ESCROW: REFUND TO DONOR (admin only)
 // ─────────────────────────────────────────────
 const refundEscrow = async (req, res, next) => {
   const client = await pool.connect();
@@ -461,22 +474,30 @@ const refundEscrow = async (req, res, next) => {
 
     const hold = escrow.rows[0];
 
-    // Refund to donor wallet
+    // Refund to donor wallet (donor_id is the user_id)
     await client.query(
       `INSERT INTO wallets (user_id, balance) VALUES ($1, $2)
        ON CONFLICT (user_id) DO UPDATE SET balance = wallets.balance + $2`,
-      [hold.user_id, hold.amount]
+      [hold.donor_id, hold.amount]
     );
 
+    // Record transaction for donor
     await client.query(
       `INSERT INTO wallet_transactions (user_id, amount, type, reference_id, description)
        VALUES ($1, $2, 'escrow_refund', $3, $4)`,
-      [hold.user_id, hold.amount, hold.id, 'Escrow refund to wallet']
+      [hold.donor_id, hold.amount, hold.id, 'Escrow refund due to campaign cancellation']
     );
 
+    // Update escrow status
     await client.query(
       `UPDATE escrow_holds SET status = 'refunded', released_at = NOW() WHERE id = $1`,
       [escrow_id]
+    );
+
+    // Update donation escrow_status
+    await client.query(
+      `UPDATE donations SET escrow_status = 'refunded' WHERE id = $1`,
+      [hold.donation_id]
     );
 
     await client.query('COMMIT');

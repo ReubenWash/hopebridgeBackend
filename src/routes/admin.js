@@ -1,6 +1,12 @@
 const router = require('express').Router()
 const { requireAdmin } = require('../middleware/auth')
-const { adminGetAllCampaigns, adminUpdateStatus } = require('../controllers/campaignController')
+const {
+  adminGetAllCampaigns,
+  adminUpdateStatus,
+  getCompletionRequests,               // <-- new: list campaigns awaiting completion
+  adminReleaseCampaignEscrow,          // <-- new: release escrow to creator
+  adminRefundCampaignEscrow,           // <-- new: refund escrow to donors (cancel campaign)
+} = require('../controllers/campaignController')
 const { adminGetAllDonations } = require('../controllers/donationController')
 const {
   getStats, getAllUsers, toggleUserActive,
@@ -14,6 +20,9 @@ const {
 const {
   getAllDepositRequests,
   updateDepositRequest,
+  getAllWithdrawalRequests,
+  approveWithdrawal,
+  rejectWithdrawal,
 } = require('../controllers/adminWalletController')
 
 // NOTE: authenticate runs once in server.js via app.use('/api/admin', authenticate, adminRoutes)
@@ -53,5 +62,15 @@ router.post('/mass-mail',             sendMassMail)
 // ── Wallet & Deposit Requests (Admin) ──────────────────────────────
 router.get('/deposit-requests',       getAllDepositRequests)
 router.put('/deposit-requests/:id',   updateDepositRequest)
+
+// ── Withdrawal Requests (Admin) ───────────────────────────────────
+router.get('/withdrawal-requests',    getAllWithdrawalRequests)
+router.put('/withdrawal-requests/:id/approve', approveWithdrawal)
+router.put('/withdrawal-requests/:id/reject',  rejectWithdrawal)
+
+// ── Escrow & Campaign Completion (Admin) ──────────────────────────
+router.get('/campaigns/completion-requests',   getCompletionRequests)
+router.post('/campaigns/:id/release-escrow',   adminReleaseCampaignEscrow)
+router.post('/campaigns/:id/refund-escrow',    adminRefundCampaignEscrow)
 
 module.exports = router

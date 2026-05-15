@@ -38,21 +38,16 @@ if (!fs.existsSync(uploadsDir)) {
 const rawOrigins = process.env.CLIENT_URL || 'http://localhost:5173'
 const allowedOrigins = rawOrigins.split(',').map(o => o.trim())
 
-// Allow PayPal sandbox/live domains for SDK loading
-const paypalDomains = [
-  'https://www.paypal.com',
-  'https://www.sandbox.paypal.com',
-  'https://api-m.paypal.com',
-  'https://api-m.sandbox.paypal.com',
-]
+
 
 app.use(helmet({
   contentSecurityPolicy: {
     directives: {
       defaultSrc: ["'self'"],
-      scriptSrc: ["'self'", "'unsafe-inline'", 'https://www.paypal.com', 'https://www.sandbox.paypal.com', 'https://www.recaptcha.net', 'https://www.google.com'],
-      frameSrc: ["'self'", 'https://www.paypal.com', 'https://www.sandbox.paypal.com'],
-      connectSrc: ["'self'", ...paypalDomains, 'https://www.google-analytics.com'],
+     
+      scriptSrc: ["'self'", "'unsafe-inline'", 'https://www.recaptcha.net', 'https://www.google.com'],
+      frameSrc: ["'self'"],
+      connectSrc: ["'self'", 'https://www.google-analytics.com'],
       imgSrc: ["'self'", 'data:', 'https:', 'blob:'],
       styleSrc: ["'self'", "'unsafe-inline'", 'https:'],
     },

@@ -2,9 +2,6 @@ const router = require('express').Router();
 const { body } = require('express-validator');
 
 const {
-  createDonation,
-  createPayPalOrder,
-  capturePayPalOrder,
   getCampaignDonations,
   getCreatorPaymentMethod,
   saveCreatorPaymentMethod,
@@ -14,31 +11,10 @@ const {
 const { authenticate, requireCreator } = require('../middleware/auth');
 const { validate } = require('../middleware/errorHandler');
 
-// PayPal – public (no auth required for guest donations)
-router.post(
-  '/paypal/create-order',
-  [
-    body('campaign_id').isInt({ min: 1 }).withMessage('Valid campaign ID is required'),
-    body('amount').isFloat({ min: 1 }).withMessage('Amount must be at least $1'),
-    body('donor_name').optional().trim(),
-    body('donor_email').optional().isEmail().normalizeEmail(),
-    body('message').optional().trim(),
-    body('is_monthly').optional().isBoolean(),
-  ],
-  validate,
-  createPayPalOrder
-);
-
-router.post(
-  '/paypal/capture-order',
-  [body('orderID').notEmpty().withMessage('PayPal order ID is required')],
-  validate,
-  capturePayPalOrder
-);
-
-// Auth required routes
+// Auth required routes for donors
 router.get('/my', authenticate, getMyDonations);
 
+// Creator routes – view donations for their campaigns
 router.get(
   '/campaign/:id',
   authenticate,
@@ -46,7 +22,7 @@ router.get(
   getCampaignDonations
 );
 
-// Creator payment method
+// Creator payment method (for withdrawals – bank details)
 router.get(
   '/creator/payment-method',
   authenticate,
@@ -59,13 +35,16 @@ router.put(
   authenticate,
   requireCreator,
   [
-    body('paypal_email').optional().isEmail().withMessage('Valid PayPal email is required'),
+    body('account_name').optional().trim(),
+    body('account_number').optional().trim(),
+    body('bank_name').optional().trim(),
+    body('paypal_email').optional().isEmail().withMessage('Valid PayPal email is required if using PayPal'),
   ],
   validate,
   saveCreatorPaymentMethod
 );
 
-// Legacy card donation stub
-router.post('/', createDonation);
+// All donation creation is now handled by wallet routes (with optional escrow for wallet)
+// No PayPal or direct card endpoints remain
 
 module.exports = router;
