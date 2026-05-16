@@ -100,6 +100,135 @@ const saveCreatorPaymentMethod = async (req, res, next) => {
 };
 
 // ─────────────────────────────────────────────
+// CREATOR WALLET (balance and total earned)
+// ─────────────────────────────────────────────
+const getCreatorWallet = async (req, res, next) => {
+  try {
+    // Get wallet balance
+    const walletRes = await pool.query(
+      'SELECT balance FROM wallets WHERE user_id = $1',
+      [req.user.id]
+    );
+    
+    // Get total earned from escrow releases
+    const earnedRes = await pool.query(
+      `SELECT COALESCE(SUM(amount), 0) as total 
+       FROM wallet_transactions 
+       WHERE user_id = $1 AND type = 'escrow_release'`,
+      [req.user.id]
+    );
+    
+    res.json({
+      balance: parseFloat(walletRes.rows[0]?.balance || 0),
+      total_earned: parseFloat(earnedRes.rows[0]?.total || 0)
+    });
+  } catch (err) { next(err); }
+};
+
+// ─────────────────────────────────────────────
+// GET MY PAYOUT REQUESTS (withdrawals)
+// ─────────────────────────────────────────────
+const getMyPayoutRequests = async (req, res, next) => {
+  try {
+    const result = await pool.query(
+      `SELECT * FROM withdrawal_requests 
+       WHERE user_id = $1 
+       ORDER BY created_at DESC`,
+      [req.user.id]
+    );
+    res.json({ requests: result.rows });
+  } catch (err) { next(err); }
+};
+
+// ─────────────────────────────────────────────
+// REQUEST PAYOUT (withdrawal)
+// ─────────────────────────────────────────────
+const requestPayout = async (req, res, next) => {
+  const client = await pool.connect();
+  try {
+    const { amount, payment_method = 'bank', payment_details } = req.body;
+    const withdrawAmount = parseFloat(amount);
+    
+    if (!withdrawAmount || withdrawAmount <= 0) {
+      return res.status(400).json({ error: 'Invalid amount' });
+    }
+    
+    await client.query('BEGIN');
+    
+    // Check wallet balance
+    const walletRes = await client.query(
+      'SELECT balance FROM wallets WHERE user_id = $1 FOR UPDATE',
+      [req.user.id]
+    );
+    
+    const balance = parseFloat(walletRes.rows[0]?.balance || 0);
+    if (withdrawAmount > balance) {
+      await client.query('ROLLBACK');
+      return res.status(400).json({ error: 'Insufficient balance' });
+    }
+    
+    // Create withdrawal request (don't deduct balance yet - admin approves first)
+    const result = await client.query(
+      `INSERT INTO withdrawal_requests 
+       (user_id, amount, payment_method, payment_details, status)
+       VALUES ($1, $2, $3, $4, 'pending')
+       RETURNING *`,
+      [req.user.id, withdrawAmount, payment_method, payment_details || '']
+    );
+    
+    await client.query('COMMIT');
+    
+    // Notify admin (optional)
+    const adminRes = await pool.query("SELECT email FROM users WHERE role = 'admin' LIMIT 1");
+    if (adminRes.rows.length > 0) {
+      console.log(`Admin notified: Withdrawal request #${result.rows[0].id} for $${withdrawAmount} from user ${req.user.id}`);
+    }
+    
+    res.status(201).json({
+      message: 'Withdrawal request submitted. Admin will review and process.',
+      request: result.rows[0]
+    });
+  } catch (err) {
+    await client.query('ROLLBACK');
+    next(err);
+  } finally {
+    client.release();
+  }
+};
+
+// ─────────────────────────────────────────────
+// UPDATE CAMPAIGN PROGRESS (manual update for testing)
+// ─────────────────────────────────────────────
+const updateCampaignProgress = async (req, res, next) => {
+  try {
+    const { id } = req.params;
+    const { raised } = req.body;
+    
+    // Verify campaign belongs to creator
+    const campCheck = await pool.query(
+      'SELECT id, creator_id FROM campaigns WHERE id = $1',
+      [id]
+    );
+    
+    if (campCheck.rows.length === 0) {
+      return res.status(404).json({ error: 'Campaign not found' });
+    }
+    
+    // Allow admin or creator to update
+    if (campCheck.rows[0].creator_id !== req.user.id && req.user.role !== 'admin') {
+      return res.status(403).json({ error: 'Not authorized to update this campaign' });
+    }
+    
+    await pool.query(
+      'UPDATE campaigns SET raised = $1 WHERE id = $2',
+      [raised, id]
+    );
+    
+    res.json({ message: 'Progress updated successfully' });
+  } catch (err) { next(err); }
+};
+
+// ─────────────────────────────────────────────
 // ADMIN: GET ALL DONATIONS
 // ─────────────────────────────────────────────
 const adminGetAllDonations = async (req, res, next) => {
@@ -182,4 +311,8 @@ module.exports = {
   saveCreatorPaymentMethod,
   adminGetAllDonations,
   getDonationById,
+  getCreatorWallet,
+  getMyPayoutRequests,
+  requestPayout,
+  updateCampaignProgress,
 };
