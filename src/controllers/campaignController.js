@@ -4,7 +4,7 @@ const {
   sendNewCampaignAdminAlert,
 } = require('../utils/email')
 
-// Helper to ensure image_url is absolute
+// Helper to ensure image_url is absolute (for local storage fallback)
 const ensureAbsoluteImageUrl = (url, req) => {
   if (!url) return null;
   if (url.startsWith('http')) return url;
@@ -77,13 +77,23 @@ const getCampaign = async (req, res, next) => {
   } catch (err) { next(err) }
 }
 
-// POST /api/campaigns  — creator only
+// POST /api/campaigns  — creator only (UPDATED for Cloudinary)
 const createCampaign = async (req, res, next) => {
   try {
     const { title, description, goal, category = 'General' } = req.body
-    const image_url = req.file
-      ? `${req.protocol}://${req.get('host')}/uploads/${req.file.filename}`
-      : req.body.image_url || null
+    
+    // Get image URL - now from Cloudinary (req.file.path) or body
+    // Cloudinary returns the full URL in req.file.path
+    let image_url = null;
+    if (req.file) {
+      // Cloudinary storage provides the URL
+      image_url = req.file.path || req.file.secure_url;
+      console.log('Image uploaded to Cloudinary:', image_url);
+    } else if (req.body.image_url) {
+      image_url = req.body.image_url;
+    }
+
+    console.log('Creating campaign:', { title, goal, category, image_url });
 
     const result = await pool.query(`
       INSERT INTO campaigns (creator_id, title, description, goal, image_url, category)
@@ -92,6 +102,7 @@ const createCampaign = async (req, res, next) => {
     `, [req.user.id, title.trim(), description?.trim(), parseFloat(goal), image_url, category])
 
     const campaign = result.rows[0]
+    console.log('Campaign created:', campaign.id);
 
     // Notify admin by email
     const adminRes = await pool.query("SELECT email FROM users WHERE role = 'admin' LIMIT 1")
@@ -104,11 +115,20 @@ const createCampaign = async (req, res, next) => {
       }).catch(e => console.warn('Admin alert email failed:', e.message))
     }
 
-    res.status(201).json({ message: 'Campaign submitted for review.', campaign })
-  } catch (err) { next(err) }
+    res.status(201).json({ 
+      message: 'Campaign submitted for review.', 
+      campaign: {
+        ...campaign,
+        image_url: ensureAbsoluteImageUrl(campaign.image_url, req)
+      }
+    })
+  } catch (err) {
+    console.error('Create campaign error:', err);
+    next(err)
+  }
 }
 
-// PATCH /api/campaigns/:id  — creator only, only if pending
+// PATCH /api/campaigns/:id  — creator only, only if pending (UPDATED for Cloudinary)
 const updateCampaign = async (req, res, next) => {
   try {
     const existing = await pool.query(
@@ -121,9 +141,15 @@ const updateCampaign = async (req, res, next) => {
     }
 
     const { title, description, goal, category } = req.body
-    const image_url = req.file
-      ? `${req.protocol}://${req.get('host')}/uploads/${req.file.filename}`
-      : req.body.image_url || existing.rows[0].image_url
+    
+    // Get image URL from Cloudinary or keep existing
+    let image_url = existing.rows[0].image_url;
+    if (req.file) {
+      image_url = req.file.path || req.file.secure_url;
+      console.log('Updated image uploaded to Cloudinary:', image_url);
+    } else if (req.body.image_url) {
+      image_url = req.body.image_url;
+    }
 
     const result = await pool.query(`
       UPDATE campaigns
@@ -132,8 +158,17 @@ const updateCampaign = async (req, res, next) => {
       RETURNING *
     `, [title, description, parseFloat(goal), image_url, category, req.params.id, req.user.id])
 
-    res.json({ message: 'Campaign updated.', campaign: result.rows[0] })
-  } catch (err) { next(err) }
+    res.json({ 
+      message: 'Campaign updated.', 
+      campaign: {
+        ...result.rows[0],
+        image_url: ensureAbsoluteImageUrl(result.rows[0].image_url, req)
+      }
+    })
+  } catch (err) { 
+    console.error('Update campaign error:', err);
+    next(err) 
+  }
 }
 
 // DELETE /api/campaigns/:id  — creator or admin
@@ -232,7 +267,7 @@ const adminUpdateStatus = async (req, res, next) => {
   } catch (err) { next(err) }
 }
 
-// ========== ESCROW & COMPLETION REQUESTS (Step 6) ==========
+// ========== ESCROW & COMPLETION REQUESTS ==========
 
 // Creator requests to complete a campaign (release escrow)
 const requestCampaignCompletion = async (req, res, next) => {
@@ -240,7 +275,6 @@ const requestCampaignCompletion = async (req, res, next) => {
   const userId = req.user.id;
 
   try {
-    // Verify campaign belongs to this creator
     const campRes = await pool.query(
       'SELECT id, creator_id, status FROM campaigns WHERE id = $1 AND creator_id = $2',
       [id, userId]
@@ -252,7 +286,6 @@ const requestCampaignCompletion = async (req, res, next) => {
       return res.status(400).json({ error: 'Only approved campaigns can be completed' });
     }
 
-    // Add columns if not exist (safe, idempotent)
     await pool.query(
       `ALTER TABLE campaigns ADD COLUMN IF NOT EXISTS completion_requested BOOLEAN DEFAULT FALSE;
        ALTER TABLE campaigns ADD COLUMN IF NOT EXISTS completion_requested_at TIMESTAMPTZ;`
@@ -265,10 +298,8 @@ const requestCampaignCompletion = async (req, res, next) => {
       [id]
     );
 
-    // Notify admin
     const adminRes = await pool.query("SELECT email FROM users WHERE role = 'admin' LIMIT 1");
     if (adminRes.rows.length > 0) {
-      // Optional: send email
       console.log(`Admin notified: Campaign ${id} completion requested by user ${userId}`);
     }
 
@@ -278,15 +309,14 @@ const requestCampaignCompletion = async (req, res, next) => {
   }
 };
 
-// Admin releases escrow for a campaign (after verification)
+// Admin releases escrow for a campaign
 const adminReleaseCampaignEscrow = async (req, res, next) => {
-  const { id } = req.params; // campaign id
+  const { id } = req.params;
   const client = await pool.connect();
 
   try {
     await client.query('BEGIN');
 
-    // Get all held escrow records for this campaign
     const escrows = await client.query(
       `SELECT eh.*, d.donor_id
        FROM escrow_holds eh
@@ -300,7 +330,6 @@ const adminReleaseCampaignEscrow = async (req, res, next) => {
       return res.status(404).json({ error: 'No held escrow found for this campaign' });
     }
 
-    // Get campaign details
     const campRes = await client.query(
       'SELECT id, title, creator_id FROM campaigns WHERE id = $1',
       [id]
@@ -315,27 +344,23 @@ const adminReleaseCampaignEscrow = async (req, res, next) => {
     let totalReleased = 0;
 
     for (const escrow of escrows.rows) {
-      // Credit creator wallet
       await client.query(
         `INSERT INTO wallets (user_id, balance) VALUES ($1, $2)
          ON CONFLICT (user_id) DO UPDATE SET balance = wallets.balance + $2`,
         [creatorId, escrow.amount]
       );
 
-      // Transaction for creator
       await client.query(
         `INSERT INTO wallet_transactions (user_id, amount, type, reference_id, description)
          VALUES ($1, $2, 'escrow_release', $3, $4)`,
         [creatorId, escrow.amount, escrow.id, `Escrow release for campaign "${campaign.title}"`]
       );
 
-      // Update escrow hold status
       await client.query(
         `UPDATE escrow_holds SET status = 'released', released_at = NOW() WHERE id = $1`,
         [escrow.id]
       );
 
-      // Update donation escrow_status
       await client.query(
         `UPDATE donations SET escrow_status = 'released' WHERE id = $1`,
         [escrow.donation_id]
@@ -344,13 +369,11 @@ const adminReleaseCampaignEscrow = async (req, res, next) => {
       totalReleased += parseFloat(escrow.amount);
     }
 
-    // Update campaign raised amount (add total released)
     await client.query(
       `UPDATE campaigns SET raised = raised + $1, status = 'completed' WHERE id = $2`,
       [totalReleased, id]
     );
 
-    // Remove completion request flag
     await client.query(
       `UPDATE campaigns SET completion_requested = FALSE WHERE id = $1`,
       [id]
@@ -398,7 +421,6 @@ const adminRefundCampaignEscrow = async (req, res, next) => {
     const campaignTitle = campRes.rows[0]?.title || 'Campaign';
 
     for (const escrow of escrows.rows) {
-      // Refund donor
       await client.query(
         `INSERT INTO wallets (user_id, balance) VALUES ($1, $2)
          ON CONFLICT (user_id) DO UPDATE SET balance = wallets.balance + $2`,
@@ -422,7 +444,6 @@ const adminRefundCampaignEscrow = async (req, res, next) => {
       );
     }
 
-    // Update campaign status to cancelled
     await client.query(
       `UPDATE campaigns SET status = 'rejected' WHERE id = $1`,
       [id]
@@ -465,7 +486,6 @@ module.exports = {
   getMyCampaigns,
   adminGetAllCampaigns,
   adminUpdateStatus,
-  // Escrow & completion
   requestCampaignCompletion,
   adminReleaseCampaignEscrow,
   adminRefundCampaignEscrow,

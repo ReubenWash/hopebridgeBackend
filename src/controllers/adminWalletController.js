@@ -35,7 +35,6 @@ const updateDepositRequest = async (req, res, next) => {
   try {
     await client.query('BEGIN');
 
-    // Lock the row to prevent race conditions
     const beforeUpdate = await client.query(
       'SELECT * FROM deposit_requests WHERE id = $1 FOR UPDATE',
       [id]
@@ -47,7 +46,6 @@ const updateDepositRequest = async (req, res, next) => {
 
     const existing = beforeUpdate.rows[0];
 
-    // ✅ Prevent multiple approvals/rejections
     if (existing.status === 'approved') {
       await client.query('ROLLBACK');
       return res.status(400).json({ error: 'Deposit request already approved' });
@@ -57,19 +55,16 @@ const updateDepositRequest = async (req, res, next) => {
       return res.status(400).json({ error: 'Deposit request already rejected' });
     }
 
-    // ✅ Prevent approving without instructions being sent first
     if (status === 'approved' && existing.status !== 'awaiting_proof') {
       await client.query('ROLLBACK');
       return res.status(400).json({ error: 'Cannot approve: proof has not been uploaded yet' });
     }
 
-    // ✅ Prevent sending instructions if already approved/rejected
     if (status === 'instructions_sent' && (existing.status === 'approved' || existing.status === 'rejected')) {
       await client.query('ROLLBACK');
       return res.status(400).json({ error: 'Cannot send instructions for already processed request' });
     }
 
-    // Build update query
     let updateQuery = `
       UPDATE deposit_requests
       SET 
@@ -97,23 +92,19 @@ const updateDepositRequest = async (req, res, next) => {
 
     const request = result.rows[0];
 
-    // ✅ On approval: credit wallet (with duplicate check)
     if (status === 'approved' && existing.status !== 'approved') {
-      // Check if already credited to prevent double credit
       const existingCredit = await client.query(
         'SELECT id FROM wallet_transactions WHERE reference = $1 AND type = $2',
         [`DEP-${id}`, 'deposit']
       );
       
       if (existingCredit.rows.length === 0) {
-        // Create or update wallet
         await client.query(
           `INSERT INTO wallets (user_id, balance) VALUES ($1, $2)
            ON CONFLICT (user_id) DO UPDATE SET balance = wallets.balance + $2`,
           [existing.user_id, existing.amount]
         );
 
-        // Record transaction
         await client.query(
           `INSERT INTO wallet_transactions (user_id, amount, type, reference, description)
            VALUES ($1, $2, 'deposit', $3, $4)`,
@@ -124,7 +115,6 @@ const updateDepositRequest = async (req, res, next) => {
 
     await client.query('COMMIT');
 
-    // Email user on status changes
     const userRes = await pool.query('SELECT name, email FROM users WHERE id = $1', [existing.user_id]);
     if (userRes.rows.length > 0) {
       const user = userRes.rows[0];
@@ -196,7 +186,6 @@ const approveWithdrawal = async (req, res, next) => {
 
     await client.query('BEGIN');
 
-    // Lock row to prevent race conditions
     const wdRes = await client.query(
       'SELECT * FROM withdrawal_requests WHERE id = $1 FOR UPDATE',
       [id]
@@ -208,13 +197,11 @@ const approveWithdrawal = async (req, res, next) => {
 
     const wd = wdRes.rows[0];
     
-    // ✅ Prevent multiple approvals
     if (wd.status !== 'pending') {
       await client.query('ROLLBACK');
       return res.status(400).json({ error: 'Request already processed' });
     }
 
-    // Check wallet balance
     const walletRes = await client.query(
       'SELECT balance FROM wallets WHERE user_id = $1 FOR UPDATE',
       [wd.user_id]
@@ -225,20 +212,18 @@ const approveWithdrawal = async (req, res, next) => {
       return res.status(400).json({ error: 'User has insufficient balance' });
     }
 
-    // Deduct wallet
     await client.query(
       'UPDATE wallets SET balance = balance - $1, updated_at = NOW() WHERE user_id = $2',
       [wd.amount, wd.user_id]
     );
 
-    // Record transaction
+    // ✅ FIX: Make sure amount is negative for withdrawal
     await client.query(
       `INSERT INTO wallet_transactions (user_id, amount, type, reference, description)
        VALUES ($1, $2, 'withdrawal_out', $3, $4)`,
-      [wd.user_id, -wd.amount, `WD-${id}`, `Withdrawal approved (ID: ${id})`]
+      [wd.user_id, -Math.abs(wd.amount), `WD-${id}`, `Withdrawal approved (ID: ${id})`]
     );
 
-    // Update status to approved
     await client.query(
       `UPDATE withdrawal_requests SET status = 'approved', processed_at = NOW() WHERE id = $1`,
       [id]
@@ -246,7 +231,6 @@ const approveWithdrawal = async (req, res, next) => {
 
     await client.query('COMMIT');
 
-    // Notify user
     const userRes = await pool.query('SELECT name, email FROM users WHERE id = $1', [wd.user_id]);
     if (userRes.rows.length > 0) {
       sendWithdrawalStatusEmail({
@@ -275,7 +259,6 @@ const rejectWithdrawal = async (req, res, next) => {
     const { id } = req.params;
     const { reason = 'Rejected by admin' } = req.body;
 
-    // First check if already processed
     const checkRes = await pool.query(
       'SELECT status FROM withdrawal_requests WHERE id = $1',
       [id]
