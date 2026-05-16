@@ -13,6 +13,7 @@ const donationRoutes = require('./routes/donations')
 const adminRoutes    = require('./routes/admin')
 const publicRoutes   = require('./routes/public')
 const walletRoutes   = require('./routes/wallet')
+const userRoutes     = require('./routes/users')  // ✅ Added user routes
 
 const { authenticate } = require('./middleware/auth')
 const { errorHandler } = require('./middleware/errorHandler')
@@ -21,8 +22,8 @@ const pool = require('./config/db')
 
 const app = express()
 
-// ✅ FIX: Trust Vercel's proxy (fixes express-rate-limit validation error)
-app.set('trust proxy', 1)   // or 'true' – both work for Vercel
+// ✅ FIX: Trust proxy (fixes express-rate-limit validation error)
+app.set('trust proxy', 1)
 
 const PORT = process.env.PORT || 5000
 const isDev = (process.env.NODE_ENV || 'development') === 'development'
@@ -36,15 +37,19 @@ if (!fs.existsSync(uploadsDir)) {
 
 /* ── CORS ───────────────────────────────────────── */
 const rawOrigins = process.env.CLIENT_URL || 'http://localhost:5173'
-const allowedOrigins = rawOrigins.split(',').map(o => o.trim())
+const allowedOrigins = [
+  ...rawOrigins.split(',').map(o => o.trim()),
+  'https://hopebridge-inky.vercel.app',
+  'http://localhost:5173',
+  'http://localhost:3000',
+].filter(Boolean)
 
-
+console.log('CORS allowed origins:', allowedOrigins)
 
 app.use(helmet({
   contentSecurityPolicy: {
     directives: {
       defaultSrc: ["'self'"],
-     
       scriptSrc: ["'self'", "'unsafe-inline'", 'https://www.recaptcha.net', 'https://www.google.com'],
       frameSrc: ["'self'"],
       connectSrc: ["'self'", 'https://www.google-analytics.com'],
@@ -56,16 +61,19 @@ app.use(helmet({
 
 app.use(cors({
   origin: function (origin, callback) {
+    // Allow requests with no origin (like mobile apps or curl)
     if (!origin) return callback(null, true)
-    if (allowedOrigins.includes(origin) || allowedOrigins[0] === '*') {
+    
+    if (allowedOrigins.includes(origin) || allowedOrigins.includes('*')) {
       callback(null, true)
     } else {
+      console.log('Blocked CORS from:', origin)
       callback(new Error('Not allowed by CORS'))
     }
   },
   credentials: true,
-  methods: ['GET','POST','PUT','PATCH','DELETE','OPTIONS'],
-  allowedHeaders: ['Content-Type','Authorization'],
+  methods: ['GET', 'POST', 'PUT', 'PATCH', 'DELETE', 'OPTIONS'],
+  allowedHeaders: ['Content-Type', 'Authorization', 'X-Requested-With'],
 }))
 
 // Handle preflight
@@ -74,7 +82,7 @@ app.options('*', cors())
 /* ── Static uploads ─────────────────────────────── */
 app.use('/uploads', (req, res, next) => {
   const origin = req.headers.origin
-  if (origin && (allowedOrigins.includes(origin) || allowedOrigins[0] === '*')) {
+  if (origin && (allowedOrigins.includes(origin) || allowedOrigins.includes('*'))) {
     res.setHeader('Access-Control-Allow-Origin', origin)
   }
   res.setHeader('Cross-Origin-Resource-Policy', 'cross-origin')
@@ -82,14 +90,25 @@ app.use('/uploads', (req, res, next) => {
 }, express.static(uploadsDir))
 
 /* ── Rate limits ────────────────────────────────── */
-app.use(rateLimit({
+// Strict limiter for auth and sensitive routes
+const strictLimiter = rateLimit({
   windowMs: 15 * 60 * 1000,
-  max: isDev ? 100000 : 300,
+  max: isDev ? 100000 : 50,
   message: { error: 'Too many requests. Please try again later.' },
   standardHeaders: true,
   legacyHeaders: false,
   skip: () => isDev,
-}))
+})
+
+// Relaxed limiter for public routes (campaigns, users)
+const relaxedLimiter = rateLimit({
+  windowMs: 15 * 60 * 1000,
+  max: isDev ? 100000 : 500,
+  message: { error: 'Too many requests. Please try again later.' },
+  standardHeaders: true,
+  legacyHeaders: false,
+  skip: () => isDev,
+})
 
 const authLimiter = rateLimit({
   windowMs: 15 * 60 * 1000,
@@ -146,12 +165,18 @@ app.post('/temp-create-admin', async (req, res) => {
 })
 
 /* ── API Routes ─────────────────────────────────── */
-app.use('/api/auth',      authLimiter, authRoutes)
-app.use('/api/campaigns', campaignRoutes)
+// Public routes with relaxed rate limiting
+app.use('/api/campaigns', relaxedLimiter, campaignRoutes)
+app.use('/api/users', relaxedLimiter, userRoutes)
+app.use('/api', publicRoutes)
+
+// Auth routes with strict rate limiting
+app.use('/api/auth', authLimiter, authRoutes)
+
+// Protected routes
 app.use('/api/donations', paymentLimiter, donationRoutes)
-app.use('/api/admin',     authenticate, adminRoutes)
-app.use('/api/wallet',    walletRoutes)    // auth handled per-route
-app.use('/api',           publicRoutes)   // public settings
+app.use('/api/admin', authenticate, adminRoutes)
+app.use('/api/wallet', walletRoutes)    // auth handled per-route
 
 /* ── 404 ────────────────────────────────────────── */
 app.use((req, res) => {

@@ -32,7 +32,7 @@ const getAllCampaigns = async (req, res, next) => {
 
     values.push(parseInt(limit), offset)
     const result = await pool.query(`
-      SELECT c.*, u.name AS creator_name,
+      SELECT c.*, u.name AS creator_name, u.id AS creator_id,
              (SELECT COALESCE(SUM(amount),0) FROM donations WHERE campaign_id = c.id) AS raised
       FROM campaigns c
       JOIN users u ON c.creator_id = u.id
@@ -60,7 +60,7 @@ const getAllCampaigns = async (req, res, next) => {
 const getCampaign = async (req, res, next) => {
   try {
     const result = await pool.query(`
-      SELECT c.*, u.name AS creator_name,
+      SELECT c.*, u.name AS creator_name, u.id AS creator_id,
              (SELECT COALESCE(SUM(amount),0) FROM donations WHERE campaign_id = c.id) AS raised
       FROM campaigns c
       JOIN users u ON c.creator_id = u.id
@@ -193,9 +193,10 @@ const deleteCampaign = async (req, res, next) => {
 const getMyCampaigns = async (req, res, next) => {
   try {
     const result = await pool.query(`
-      SELECT c.*,
+      SELECT c.*, u.id AS creator_id,
              (SELECT COALESCE(SUM(amount),0) FROM donations WHERE campaign_id = c.id) AS raised
       FROM campaigns c
+      JOIN users u ON c.creator_id = u.id
       WHERE c.creator_id = $1
       ORDER BY c.created_at DESC
     `, [req.user.id])
@@ -221,7 +222,7 @@ const adminGetAllCampaigns = async (req, res, next) => {
     if (status) { where = 'WHERE c.status = $1'; values.push(status) }
 
     const result = await pool.query(`
-      SELECT c.*, u.name AS creator_name,
+      SELECT c.*, u.name AS creator_name, u.id AS creator_id,
              (SELECT COALESCE(SUM(amount),0) FROM donations WHERE campaign_id = c.id) AS raised
       FROM campaigns c JOIN users u ON c.creator_id = u.id
       ${where}

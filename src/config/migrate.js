@@ -37,7 +37,20 @@ const migrate = async (closePool = true) => {
         image_url TEXT,
         category VARCHAR(80) DEFAULT 'General',
         status VARCHAR(20) DEFAULT 'pending'
-          CHECK (status IN ('pending','approved','rejected')),
+          CHECK (status IN ('pending','approved','rejected','completed')),
+        created_at TIMESTAMPTZ DEFAULT NOW(),
+        updated_at TIMESTAMPTZ DEFAULT NOW(),
+        completion_requested BOOLEAN DEFAULT FALSE,
+        completion_requested_at TIMESTAMPTZ,
+        completed_at TIMESTAMPTZ
+      );
+
+      -- CAMPAIGN UPDATES (for campaign profile updates/announcements)
+      CREATE TABLE IF NOT EXISTS campaign_updates (
+        id SERIAL PRIMARY KEY,
+        campaign_id INTEGER REFERENCES campaigns(id) ON DELETE CASCADE,
+        title VARCHAR(200) NOT NULL,
+        content TEXT NOT NULL,
         created_at TIMESTAMPTZ DEFAULT NOW(),
         updated_at TIMESTAMPTZ DEFAULT NOW()
       );
@@ -76,7 +89,7 @@ const migrate = async (closePool = true) => {
         updated_at TIMESTAMPTZ DEFAULT NOW()
       );
 
-      -- WALLET TRANSACTIONS (LEDGER) - WITH CORRECT TYPE CHECK
+      -- WALLET TRANSACTIONS (LEDGER)
       CREATE TABLE IF NOT EXISTS wallet_transactions (
         id SERIAL PRIMARY KEY,
         user_id INTEGER REFERENCES users(id) ON DELETE CASCADE,
@@ -178,6 +191,14 @@ const migrate = async (closePool = true) => {
           FOR EACH ROW EXECUTE FUNCTION update_updated_at();
         END IF;
       END $$;
+
+      DO $$ BEGIN
+        IF NOT EXISTS (SELECT 1 FROM pg_trigger WHERE tgname = 'campaign_updates_updated') THEN
+          CREATE TRIGGER campaign_updates_updated
+          BEFORE UPDATE ON campaign_updates
+          FOR EACH ROW EXECUTE FUNCTION update_updated_at();
+        END IF;
+      END $$;
     `)
 
     // Add missing columns if they don't exist (safe ALTER TABLE)
@@ -196,6 +217,9 @@ const migrate = async (closePool = true) => {
       ALTER TABLE escrow_holds ADD COLUMN IF NOT EXISTS held_at TIMESTAMPTZ DEFAULT NOW();
       ALTER TABLE escrow_holds ADD COLUMN IF NOT EXISTS released_at TIMESTAMPTZ;
       ALTER TABLE escrow_holds ADD COLUMN IF NOT EXISTS created_at TIMESTAMPTZ DEFAULT NOW();
+      ALTER TABLE campaigns ADD COLUMN IF NOT EXISTS completion_requested BOOLEAN DEFAULT FALSE;
+      ALTER TABLE campaigns ADD COLUMN IF NOT EXISTS completion_requested_at TIMESTAMPTZ;
+      ALTER TABLE campaigns ADD COLUMN IF NOT EXISTS completed_at TIMESTAMPTZ;
     `)
 
     // ✅ FORCE FIX: Add the correct type constraint to wallet_transactions
@@ -264,6 +288,13 @@ const migrate = async (closePool = true) => {
       CHECK (escrow_status IN ('held', 'released', 'refunded'));
     `)
 
+    // ✅ Ensure campaigns status includes 'completed'
+    await client.query(`
+      ALTER TABLE campaigns DROP CONSTRAINT IF EXISTS campaigns_status_check;
+      ALTER TABLE campaigns ADD CONSTRAINT campaigns_status_check 
+      CHECK (status IN ('pending', 'approved', 'rejected', 'completed'));
+    `)
+
     // Ensure every existing user has a wallet
     await client.query(`
       INSERT INTO wallets (user_id, balance)
@@ -306,6 +337,8 @@ const migrate = async (closePool = true) => {
     console.log('📁 Cloudinary storage configured')
     console.log('🗑️ Removed PayPal and Firebase settings')
     console.log('🔒 Added wallet_transactions type constraint')
+    console.log('📊 Added campaign_updates table for profile updates')
+    console.log('✅ Added completed status to campaigns')
 
   } catch (err) {
     console.error('❌ Migration failed:', err.message)

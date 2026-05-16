@@ -2,35 +2,46 @@ const pool = require('../config/db');
 const { sendDonationConfirmation, sendNewDonationAdminAlert } = require('../utils/email');
 
 // ─────────────────────────────────────────────
-// GET CAMPAIGN DONATIONS (creator only)
+// GET CAMPAIGN DONATIONS (public for campaign profile)
 // ─────────────────────────────────────────────
 const getCampaignDonations = async (req, res, next) => {
   try {
     const { id } = req.params;
 
-    // Verify campaign belongs to creator (or admin)
-    if (req.user.role !== 'admin') {
+    // For public access (campaign profile), no auth check needed
+    // But if user is authenticated and trying to access their own campaign, verify
+    if (req.user && req.user.role !== 'admin') {
       const campCheck = await pool.query(
         'SELECT id FROM campaigns WHERE id = $1 AND creator_id = $2',
         [id, req.user.id]
       );
-      if (campCheck.rows.length === 0) {
-        return res.status(403).json({ error: 'Not authorized to view these donations.' });
+      if (campCheck.rows.length === 0 && req.user.role !== 'admin') {
+        // User is not the creator and not admin, but we still return public donations
+        // We don't block, just continue - donations are public info
       }
     }
 
     const result = await pool.query(
-      `SELECT d.*, c.title AS campaign_title
+      `SELECT d.*, c.title AS campaign_title,
+              u.name AS donor_name_from_user
        FROM donations d
        LEFT JOIN campaigns c ON d.campaign_id = c.id
-       WHERE d.campaign_id = $1
+       LEFT JOIN users u ON d.donor_id = u.id
+       WHERE d.campaign_id = $1 AND d.payment_method = 'wallet'
        ORDER BY d.created_at DESC`,
       [id]
     );
 
-    const total = result.rows.reduce((sum, d) => sum + parseFloat(d.amount), 0);
+    // Format donations with proper donor names
+    const donations = result.rows.map(d => ({
+      ...d,
+      donor_name: d.donor_name || d.donor_name_from_user || 'Anonymous',
+      amount: parseFloat(d.amount)
+    }));
 
-    res.json({ donations: result.rows, total });
+    const total = donations.reduce((sum, d) => sum + d.amount, 0);
+
+    res.json({ donations, total });
   } catch (err) { next(err); }
 };
 
@@ -40,14 +51,21 @@ const getCampaignDonations = async (req, res, next) => {
 const getMyDonations = async (req, res, next) => {
   try {
     const result = await pool.query(
-      `SELECT d.*, c.title AS campaign_title
+      `SELECT d.*, c.title AS campaign_title,
+              c.status AS campaign_status
        FROM donations d
        LEFT JOIN campaigns c ON d.campaign_id = c.id
        WHERE d.donor_email = $1 OR d.donor_id = $2
        ORDER BY d.created_at DESC`,
       [req.user.email, req.user.id]
     );
-    res.json({ donations: result.rows });
+    
+    const donations = result.rows.map(d => ({
+      ...d,
+      amount: parseFloat(d.amount)
+    }));
+    
+    res.json({ donations });
   } catch (err) { next(err); }
 };
 
@@ -87,12 +105,67 @@ const saveCreatorPaymentMethod = async (req, res, next) => {
 const adminGetAllDonations = async (req, res, next) => {
   try {
     const result = await pool.query(`
-      SELECT d.*, c.title AS campaign_title
+      SELECT d.*, c.title AS campaign_title,
+             u.name AS user_name
       FROM donations d
       LEFT JOIN campaigns c ON d.campaign_id = c.id
+      LEFT JOIN users u ON d.donor_id = u.id
       ORDER BY d.created_at DESC
     `);
-    res.json({ donations: result.rows });
+    
+    const donations = result.rows.map(d => ({
+      ...d,
+      amount: parseFloat(d.amount)
+    }));
+    
+    res.json({ donations });
+  } catch (err) { next(err); }
+};
+
+// ─────────────────────────────────────────────
+// GET DONATION BY ID (for receipt/invoice)
+// ─────────────────────────────────────────────
+const getDonationById = async (req, res, next) => {
+  try {
+    const { id } = req.params;
+    
+    const result = await pool.query(
+      `SELECT d.*, c.title AS campaign_title,
+              c.creator_id, u.name AS creator_name
+       FROM donations d
+       LEFT JOIN campaigns c ON d.campaign_id = c.id
+       LEFT JOIN users u ON c.creator_id = u.id
+       WHERE d.id = $1`,
+      [id]
+    );
+    
+    if (result.rows.length === 0) {
+      return res.status(404).json({ error: 'Donation not found' });
+    }
+    
+    // Check if user is authorized (donor, campaign creator, or admin)
+    const donation = result.rows[0];
+    if (req.user && 
+        (req.user.id === donation.donor_id || 
+         req.user.id === donation.creator_id || 
+         req.user.role === 'admin')) {
+      donation.amount = parseFloat(donation.amount);
+      res.json({ donation });
+    } else if (!req.user) {
+      // For public, return limited info
+      res.json({ 
+        donation: {
+          id: donation.id,
+          donor_name: donation.donor_name || 'Anonymous',
+          amount: parseFloat(donation.amount),
+          campaign_title: donation.campaign_title,
+          created_at: donation.created_at,
+          is_monthly: donation.is_monthly
+        }
+      });
+    } else {
+      res.status(403).json({ error: 'Not authorized to view this donation' });
+    }
   } catch (err) { next(err); }
 };
 
@@ -108,4 +181,5 @@ module.exports = {
   getCreatorPaymentMethod,
   saveCreatorPaymentMethod,
   adminGetAllDonations,
+  getDonationById,
 };
