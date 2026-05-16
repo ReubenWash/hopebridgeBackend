@@ -76,13 +76,12 @@ const migrate = async (closePool = true) => {
         updated_at TIMESTAMPTZ DEFAULT NOW()
       );
 
-      -- WALLET TRANSACTIONS (LEDGER)
+      -- WALLET TRANSACTIONS (LEDGER) - WITH CORRECT TYPE CHECK
       CREATE TABLE IF NOT EXISTS wallet_transactions (
         id SERIAL PRIMARY KEY,
         user_id INTEGER REFERENCES users(id) ON DELETE CASCADE,
         amount NUMERIC(12,2) NOT NULL,
-        type VARCHAR(30) NOT NULL
-          CHECK (type IN ('deposit','donation_out','refund_in','withdrawal_out','escrow_hold','escrow_release','escrow_refund')),
+        type VARCHAR(30) NOT NULL,
         reference VARCHAR(255),
         reference_id INTEGER,
         description TEXT,
@@ -135,7 +134,7 @@ const migrate = async (closePool = true) => {
         created_at TIMESTAMPTZ DEFAULT NOW()
       );
 
-      -- SETTINGS (removed PayPal/Firebase, added Cloudinary)
+      -- SETTINGS
       CREATE TABLE IF NOT EXISTS settings (
         id SERIAL PRIMARY KEY,
         key VARCHAR(100) UNIQUE NOT NULL,
@@ -197,6 +196,13 @@ const migrate = async (closePool = true) => {
       ALTER TABLE escrow_holds ADD COLUMN IF NOT EXISTS held_at TIMESTAMPTZ DEFAULT NOW();
       ALTER TABLE escrow_holds ADD COLUMN IF NOT EXISTS released_at TIMESTAMPTZ;
       ALTER TABLE escrow_holds ADD COLUMN IF NOT EXISTS created_at TIMESTAMPTZ DEFAULT NOW();
+    `)
+
+    // ✅ FORCE FIX: Add the correct type constraint to wallet_transactions
+    await client.query(`
+      ALTER TABLE wallet_transactions DROP CONSTRAINT IF EXISTS wallet_transactions_type_check;
+      ALTER TABLE wallet_transactions ADD CONSTRAINT wallet_transactions_type_check 
+      CHECK (type IN ('deposit', 'donation_out', 'refund_in', 'withdrawal_out', 'escrow_hold', 'escrow_release', 'escrow_refund'));
     `)
 
     // ✅ FORCE FIX: Rename user_id to donor_id in escrow_holds if it exists
@@ -299,6 +305,7 @@ const migrate = async (closePool = true) => {
     console.log('✅ Migrations completed successfully')
     console.log('📁 Cloudinary storage configured')
     console.log('🗑️ Removed PayPal and Firebase settings')
+    console.log('🔒 Added wallet_transactions type constraint')
 
   } catch (err) {
     console.error('❌ Migration failed:', err.message)
