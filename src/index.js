@@ -47,8 +47,6 @@ const allowedOrigins = [
 console.log('🌐 CORS allowed origins:', allowedOrigins)
 
 /* ── Helmet ─────────────────────────────────────── */
-// ✅ FIX: connectSrc must include your own API domain so the browser
-//    doesn't block fetch() calls to the backend from the frontend.
 const apiDomain = process.env.API_URL || 'https://cooing-rosanna-rub-3a11fd0e.koyeb.app'
 
 app.use(helmet({
@@ -57,7 +55,6 @@ app.use(helmet({
       defaultSrc: ["'self'"],
       scriptSrc:  ["'self'", "'unsafe-inline'", 'https://www.recaptcha.net', 'https://www.google.com'],
       frameSrc:   ["'self'"],
-      // ✅ Added apiDomain + Cloudinary so uploads & API calls aren't blocked
       connectSrc: ["'self'", apiDomain, 'https://api.cloudinary.com', 'https://res.cloudinary.com'],
       imgSrc:     ["'self'", 'data:', 'https:', 'blob:'],
       styleSrc:   ["'self'", "'unsafe-inline'", 'https:'],
@@ -67,7 +64,7 @@ app.use(helmet({
 
 app.use(cors({
   origin: (origin, callback) => {
-    if (!origin) return callback(null, true)   // curl / mobile / server-to-server
+    if (!origin) return callback(null, true)
     if (allowedOrigins.includes(origin)) {
       callback(null, true)
     } else {
@@ -80,7 +77,6 @@ app.use(cors({
   allowedHeaders: ['Content-Type', 'Authorization', 'X-Requested-With'],
 }))
 
-// Handle all preflight requests
 app.options('*', cors())
 
 /* ── Static uploads ─────────────────────────────── */
@@ -106,7 +102,8 @@ const mkLimiter = (max, windowMs = 15 * 60 * 1000, message = 'Too many requests.
 
 const relaxedLimiter = mkLimiter(500)
 const authLimiter    = mkLimiter(20,  15 * 60 * 1000, 'Too many auth attempts. Try again later.')
-const paymentLimiter = mkLimiter(15,  10 * 60 * 1000, 'Too many payment attempts. Please wait.')
+// paymentLimiter now only applied inside wallet routes for actual donate actions
+const paymentLimiter = mkLimiter(30,  10 * 60 * 1000, 'Too many payment attempts. Please wait.')
 
 /* ── Body parsers ───────────────────────────────── */
 app.use('/api/webhooks', express.raw({ type: 'application/json' }))
@@ -134,9 +131,8 @@ app.get('/debug-cloudinary', (req, res) => {
 })
 
 /* ── Keep-alive self-ping (prevents Koyeb cold starts) ── */
-// Pings /health every 14 minutes so the free-tier service stays warm.
 if (!isDev) {
-  const PING_INTERVAL = 14 * 60 * 1000 // 14 minutes
+  const PING_INTERVAL = 14 * 60 * 1000
   const selfUrl = `${apiDomain}/health`
 
   setInterval(async () => {
@@ -177,9 +173,11 @@ app.use('/api/campaigns', relaxedLimiter, campaignRoutes)
 app.use('/api/users',     relaxedLimiter, userRoutes)
 app.use('/api',           publicRoutes)
 app.use('/api/auth',      authLimiter,    authRoutes)
-app.use('/api/donations', paymentLimiter, donationRoutes)
+// ✅ FIX: was paymentLimiter (15 req/10min) — caused 429s on dashboard reads
+//    (wallet balance, payout requests). Now uses relaxedLimiter (500 req/15min).
+app.use('/api/donations', relaxedLimiter, donationRoutes)
 app.use('/api/admin',     authenticate,   adminRoutes)
-app.use('/api/wallet',    walletRoutes)   // auth handled per-route
+app.use('/api/wallet',    walletRoutes)   // auth + limits handled per-route
 
 /* ── 404 ────────────────────────────────────────── */
 app.use((req, res) => {
