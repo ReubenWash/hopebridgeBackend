@@ -1,5 +1,6 @@
 const cloudinary = require('cloudinary').v2;
 const { CloudinaryStorage } = require('multer-storage-cloudinary');
+const multer = require('multer');
 
 // Configure Cloudinary
 cloudinary.config({
@@ -8,7 +9,6 @@ cloudinary.config({
   api_secret: process.env.CLOUDINARY_API_SECRET,
 });
 
-// Log config status on startup
 if (
   !process.env.CLOUDINARY_CLOUD_NAME ||
   !process.env.CLOUDINARY_API_KEY    ||
@@ -19,19 +19,34 @@ if (
   console.log('✅ Cloudinary configured successfully');
 }
 
-// ── Storage ───────────────────────────────────────
-// ✅ Transformation removed — it added 5-15s of server-side processing
-//    which was causing Koyeb's 30s gateway timeout to fire.
-//    Images are stored as-is; resize on-the-fly via Cloudinary URLs if needed.
+// ── Cloudinary storage ────────────────────────────
+// No transformation applied on upload — keeps it fast.
+// If you need resizing, use Cloudinary URL params instead:
+// e.g. image_url.replace('/upload/', '/upload/w_800,c_limit/')
 const storage = new CloudinaryStorage({
   cloudinary,
-  params: {
+  params: async (req, file) => ({
     folder:          'hopebridge',
-    allowed_formats: ['jpg', 'jpeg', 'png', 'webp'],  // removed pdf — not needed for campaign images
+    allowed_formats: ['jpg', 'jpeg', 'png', 'webp'],
     resource_type:   'image',
-    // Unique filename to avoid collisions
-    public_id: (req, file) => `${Date.now()}-${Math.round(Math.random() * 1e9)}`,
+    public_id:       `${Date.now()}-${Math.round(Math.random() * 1e9)}`,
+  }),
+});
+
+// ── Multer with 5MB limit ─────────────────────────
+// Rejects oversized files before hitting Cloudinary,
+// preventing timeouts on large uploads.
+const upload = multer({
+  storage,
+  limits: { fileSize: 5 * 1024 * 1024 }, // 5MB max
+  fileFilter: (req, file, cb) => {
+    const allowed = ['image/jpeg', 'image/jpg', 'image/png', 'image/webp'];
+    if (allowed.includes(file.mimetype)) {
+      cb(null, true);
+    } else {
+      cb(new Error('Only JPG, PNG, and WebP images are allowed.'));
+    }
   },
 });
 
-module.exports = { cloudinary, storage };
+module.exports = { cloudinary, storage, upload };

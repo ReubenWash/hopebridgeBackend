@@ -16,17 +16,24 @@ const campaignValidation = [
 ]
 
 // ── Upload with timeout ───────────────────────────
-// Koyeb free tier kills requests after ~30s.
-// This wrapper times out at 25s and returns a clean error
-// instead of letting the gateway silently 504.
+// Koyeb free tier has a 30s gateway timeout.
+// 28s here gives us a clean error message before Koyeb kills it.
+// With the 5MB multer limit in cloudinary.js, most uploads
+// should complete in 3-8s — this is just a safety net.
 const uploadWithTimeout = (req, res, next) => {
   const timer = setTimeout(() => {
-    next(new Error('Image upload timed out. Please try a smaller image (under 2MB).'))
-  }, 25000)
+    next(new Error('Image upload timed out. Please use a JPG or PNG under 5MB.'))
+  }, 28000)
 
   upload.single('image')(req, res, (err) => {
     clearTimeout(timer)
-    if (err) return next(err)
+    if (err) {
+      // Multer file size error — friendly message
+      if (err.code === 'LIMIT_FILE_SIZE') {
+        return next(new Error('Image too large. Please use a file under 5MB.'))
+      }
+      return next(err)
+    }
     next()
   })
 }
