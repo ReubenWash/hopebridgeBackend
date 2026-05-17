@@ -13,7 +13,7 @@ const donationRoutes = require('./routes/donations')
 const adminRoutes    = require('./routes/admin')
 const publicRoutes   = require('./routes/public')
 const walletRoutes   = require('./routes/wallet')
-const userRoutes     = require('./routes/users')  // ✅ Added user routes
+const userRoutes     = require('./routes/users')
 
 const { authenticate } = require('./middleware/auth')
 const { errorHandler } = require('./middleware/errorHandler')
@@ -22,13 +22,13 @@ const pool = require('./config/db')
 
 const app = express()
 
-// ✅ FIX: Trust proxy (fixes express-rate-limit validation error)
+// Trust proxy (required for Koyeb / rate-limit)
 app.set('trust proxy', 1)
 
-const PORT = process.env.PORT || 5000
+const PORT  = process.env.PORT || 5000
 const isDev = (process.env.NODE_ENV || 'development') === 'development'
 
-/* ── Create uploads directory ───────────────────── */
+/* ── Uploads directory ──────────────────────────── */
 const uploadsDir = path.join(__dirname, '..', 'uploads')
 if (!fs.existsSync(uploadsDir)) {
   fs.mkdirSync(uploadsDir, { recursive: true })
@@ -36,38 +36,42 @@ if (!fs.existsSync(uploadsDir)) {
 }
 
 /* ── CORS ───────────────────────────────────────── */
-const rawOrigins = process.env.CLIENT_URL || 'http://localhost:5173'
+const rawOrigins = process.env.CLIENT_URL || ''
 const allowedOrigins = [
-  ...rawOrigins.split(',').map(o => o.trim()),
+  ...rawOrigins.split(',').map(o => o.trim()).filter(Boolean),
   'https://hopebridge-inky.vercel.app',
   'http://localhost:5173',
   'http://localhost:3000',
-].filter(Boolean)
+]
 
-console.log('CORS allowed origins:', allowedOrigins)
+console.log('🌐 CORS allowed origins:', allowedOrigins)
+
+/* ── Helmet ─────────────────────────────────────── */
+// ✅ FIX: connectSrc must include your own API domain so the browser
+//    doesn't block fetch() calls to the backend from the frontend.
+const apiDomain = process.env.API_URL || 'https://cooing-rosanna-rub-3a11fd0e.koyeb.app'
 
 app.use(helmet({
   contentSecurityPolicy: {
     directives: {
       defaultSrc: ["'self'"],
-      scriptSrc: ["'self'", "'unsafe-inline'", 'https://www.recaptcha.net', 'https://www.google.com'],
-      frameSrc: ["'self'"],
-      connectSrc: ["'self'", 'https://www.google-analytics.com'],
-      imgSrc: ["'self'", 'data:', 'https:', 'blob:'],
-      styleSrc: ["'self'", "'unsafe-inline'", 'https:'],
+      scriptSrc:  ["'self'", "'unsafe-inline'", 'https://www.recaptcha.net', 'https://www.google.com'],
+      frameSrc:   ["'self'"],
+      // ✅ Added apiDomain + Cloudinary so uploads & API calls aren't blocked
+      connectSrc: ["'self'", apiDomain, 'https://api.cloudinary.com', 'https://res.cloudinary.com'],
+      imgSrc:     ["'self'", 'data:', 'https:', 'blob:'],
+      styleSrc:   ["'self'", "'unsafe-inline'", 'https:'],
     },
   },
 }))
 
 app.use(cors({
-  origin: function (origin, callback) {
-    // Allow requests with no origin (like mobile apps or curl)
-    if (!origin) return callback(null, true)
-    
-    if (allowedOrigins.includes(origin) || allowedOrigins.includes('*')) {
+  origin: (origin, callback) => {
+    if (!origin) return callback(null, true)   // curl / mobile / server-to-server
+    if (allowedOrigins.includes(origin)) {
       callback(null, true)
     } else {
-      console.log('Blocked CORS from:', origin)
+      console.warn('🚫 Blocked CORS from:', origin)
       callback(new Error('Not allowed by CORS'))
     }
   },
@@ -76,59 +80,35 @@ app.use(cors({
   allowedHeaders: ['Content-Type', 'Authorization', 'X-Requested-With'],
 }))
 
-// Handle preflight
+// Handle all preflight requests
 app.options('*', cors())
 
 /* ── Static uploads ─────────────────────────────── */
 app.use('/uploads', (req, res, next) => {
   const origin = req.headers.origin
-  if (origin && (allowedOrigins.includes(origin) || allowedOrigins.includes('*'))) {
+  if (origin && allowedOrigins.includes(origin)) {
     res.setHeader('Access-Control-Allow-Origin', origin)
   }
   res.setHeader('Cross-Origin-Resource-Policy', 'cross-origin')
   next()
 }, express.static(uploadsDir))
 
-/* ── Rate limits ────────────────────────────────── */
-// Strict limiter for auth and sensitive routes
-const strictLimiter = rateLimit({
-  windowMs: 15 * 60 * 1000,
-  max: isDev ? 100000 : 50,
-  message: { error: 'Too many requests. Please try again later.' },
-  standardHeaders: true,
-  legacyHeaders: false,
-  skip: () => isDev,
-})
+/* ── Rate limiters ──────────────────────────────── */
+const mkLimiter = (max, windowMs = 15 * 60 * 1000, message = 'Too many requests.') =>
+  rateLimit({
+    windowMs,
+    max: isDev ? 1_000_000 : max,
+    message: { error: message },
+    standardHeaders: true,
+    legacyHeaders: false,
+    skip: () => isDev,
+  })
 
-// Relaxed limiter for public routes (campaigns, users)
-const relaxedLimiter = rateLimit({
-  windowMs: 15 * 60 * 1000,
-  max: isDev ? 100000 : 500,
-  message: { error: 'Too many requests. Please try again later.' },
-  standardHeaders: true,
-  legacyHeaders: false,
-  skip: () => isDev,
-})
-
-const authLimiter = rateLimit({
-  windowMs: 15 * 60 * 1000,
-  max: isDev ? 100000 : 20,
-  message: { error: 'Too many auth attempts. Try again later.' },
-  skipSuccessfulRequests: true,
-  skip: () => isDev,
-})
-
-const paymentLimiter = rateLimit({
-  windowMs: 10 * 60 * 1000,
-  max: isDev ? 100000 : 15,
-  message: { error: 'Too many payment attempts. Please wait.' },
-  standardHeaders: true,
-  legacyHeaders: false,
-  skip: () => isDev,
-})
+const relaxedLimiter = mkLimiter(500)
+const authLimiter    = mkLimiter(20,  15 * 60 * 1000, 'Too many auth attempts. Try again later.')
+const paymentLimiter = mkLimiter(15,  10 * 60 * 1000, 'Too many payment attempts. Please wait.')
 
 /* ── Body parsers ───────────────────────────────── */
-// Webhook needs raw body
 app.use('/api/webhooks', express.raw({ type: 'application/json' }))
 app.use(express.json({ limit: '10mb' }))
 app.use(express.urlencoded({ extended: true, limit: '10mb' }))
@@ -136,12 +116,40 @@ app.use(express.urlencoded({ extended: true, limit: '10mb' }))
 /* ── Health check ───────────────────────────────── */
 app.get('/health', (req, res) => {
   res.json({
-    status: 'ok',
+    status:  'ok',
     service: 'HopeBridge API',
-    env: process.env.NODE_ENV || 'development',
-    time: new Date().toISOString(),
+    env:     process.env.NODE_ENV || 'development',
+    time:    new Date().toISOString(),
   })
 })
+
+/* ── Cloudinary config check (remove after confirming) ── */
+app.get('/debug-cloudinary', (req, res) => {
+  res.json({
+    cloud_name: process.env.CLOUDINARY_CLOUD_NAME ? '✅ set' : '❌ MISSING',
+    api_key:    process.env.CLOUDINARY_API_KEY    ? '✅ set' : '❌ MISSING',
+    api_secret: process.env.CLOUDINARY_API_SECRET ? '✅ set' : '❌ MISSING',
+    node_env:   process.env.NODE_ENV || 'not set',
+  })
+})
+
+/* ── Keep-alive self-ping (prevents Koyeb cold starts) ── */
+// Pings /health every 14 minutes so the free-tier service stays warm.
+if (!isDev) {
+  const PING_INTERVAL = 14 * 60 * 1000 // 14 minutes
+  const selfUrl = `${apiDomain}/health`
+
+  setInterval(async () => {
+    try {
+      const res = await fetch(selfUrl)
+      console.log(`🏓 Keep-alive ping → ${res.status}`)
+    } catch (err) {
+      console.warn('⚠️  Keep-alive ping failed:', err.message)
+    }
+  }, PING_INTERVAL)
+
+  console.log(`🏓 Keep-alive enabled — pinging ${selfUrl} every 14 min`)
+}
 
 /* ── Temp admin bootstrap (REMOVE IN PRODUCTION) ── */
 app.post('/temp-create-admin', async (req, res) => {
@@ -158,25 +166,20 @@ app.post('/temp-create-admin', async (req, res) => {
       SELECT id, 0 FROM users WHERE email = 'admin@hopebridge.com'
       ON CONFLICT (user_id) DO NOTHING
     `)
-    res.json({ message: 'Admin ready. Login with admin@hopebridge.com / admin123' })
+    res.json({ message: 'Admin ready. Login: admin@hopebridge.com / admin123' })
   } catch (err) {
     res.status(500).json({ error: err.message })
   }
 })
 
-/* ── API Routes ─────────────────────────────────── */
-// Public routes with relaxed rate limiting
+/* ── API routes ─────────────────────────────────── */
 app.use('/api/campaigns', relaxedLimiter, campaignRoutes)
-app.use('/api/users', relaxedLimiter, userRoutes)
-app.use('/api', publicRoutes)
-
-// Auth routes with strict rate limiting
-app.use('/api/auth', authLimiter, authRoutes)
-
-// Protected routes
+app.use('/api/users',     relaxedLimiter, userRoutes)
+app.use('/api',           publicRoutes)
+app.use('/api/auth',      authLimiter,    authRoutes)
 app.use('/api/donations', paymentLimiter, donationRoutes)
-app.use('/api/admin', authenticate, adminRoutes)
-app.use('/api/wallet', walletRoutes)    // auth handled per-route
+app.use('/api/admin',     authenticate,   adminRoutes)
+app.use('/api/wallet',    walletRoutes)   // auth handled per-route
 
 /* ── 404 ────────────────────────────────────────── */
 app.use((req, res) => {
@@ -186,26 +189,25 @@ app.use((req, res) => {
 /* ── Error handler ──────────────────────────────── */
 app.use(errorHandler)
 
-/* ── Migrations ─────────────────────────────────── */
+/* ── Migrations + start ─────────────────────────── */
 const runMigrations = async () => {
-  console.log('🔧 Running database migrations...')
+  console.log('🔧 Running database migrations…')
   try {
     await migrate(false)
     console.log('✅ Migrations complete')
   } catch (err) {
     console.error('❌ Migration failed:', err.message)
-    // Don't exit – app may still work with existing schema
   }
 }
 
-/* ── Start server ───────────────────────────────── */
 runMigrations().then(() => {
   app.listen(PORT, () => {
-    console.log(`\n🚀 HopeBridge API on http://localhost:${PORT}`)
-    console.log(`Environment   : ${process.env.NODE_ENV || 'development'}`)
-    console.log(`CORS origins  : ${allowedOrigins.join(', ')}`)
-    console.log(`Rate limits   : ${isDev ? 'DISABLED (dev)' : 'ENABLED'}`)
-    console.log(`Health check  : http://localhost:${PORT}/health\n`)
+    console.log(`\n🚀 HopeBridge API → http://localhost:${PORT}`)
+    console.log(`   Env          : ${process.env.NODE_ENV || 'development'}`)
+    console.log(`   CORS origins : ${allowedOrigins.join(', ')}`)
+    console.log(`   Rate limits  : ${isDev ? 'DISABLED (dev)' : 'ENABLED'}`)
+    console.log(`   Cloudinary   : ${process.env.CLOUDINARY_CLOUD_NAME ? '✅ configured' : '⚠️  NOT configured'}`)
+    console.log(`   Health check : http://localhost:${PORT}/health\n`)
   })
 }).catch(err => {
   console.error('Fatal startup error:', err)
