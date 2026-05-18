@@ -34,7 +34,29 @@ const verifyRecaptcha = async (token) => {
   }
 };
 
-// POST /api/auth/register – donors and creators can register
+// GET /api/auth/verification-status - Check if email verification is enabled
+const getVerificationStatus = async (req, res, next) => {
+  try {
+    const enabled = await getSetting('email_verification_enabled');
+    res.json({ enabled: enabled === 'true' });
+  } catch (err) { 
+    next(err); 
+  }
+};
+
+// GET /api/auth/check-session - Check if user is logged in (for guest donation)
+const checkSession = async (req, res, next) => {
+  try {
+    if (!req.user) {
+      return res.json({ authenticated: false });
+    }
+    res.json({ authenticated: true, user: req.user });
+  } catch (err) { 
+    next(err); 
+  }
+};
+
+// POST /api/auth/register – ALL users need verification if enabled
 const register = async (req, res, next) => {
   try {
     const { name, email, password, role = 'donor', recaptchaToken } = req.body;
@@ -55,10 +77,14 @@ const register = async (req, res, next) => {
 
     const hash = await bcrypt.hash(password, 10);
 
-    // Donors are auto-verified; creators need email verification
-    const isVerified = userRole === 'donor';
-    const verificationCode = isVerified ? null : Math.floor(100000 + Math.random() * 900000).toString();
-    const verificationExpires = isVerified ? null : new Date(Date.now() + 15 * 60 * 1000);
+    // Check if email verification is enabled in settings
+    const verificationEnabled = await getSetting('email_verification_enabled');
+    const needsVerification = verificationEnabled === 'true';
+    
+    // If verification is disabled, auto-verify all users
+    const isVerified = !needsVerification;
+    const verificationCode = needsVerification ? Math.floor(100000 + Math.random() * 900000).toString() : null;
+    const verificationExpires = needsVerification ? new Date(Date.now() + 15 * 60 * 1000) : null;
 
     const result = await pool.query(
       `INSERT INTO users (name, email, password, role, verification_code, verification_expires, is_verified)
@@ -77,19 +103,20 @@ const register = async (req, res, next) => {
 
     const token = signToken(user);
 
-    // Send verification email for creators
-    if (!isVerified && verificationCode) {
+    // Send verification email if verification is enabled
+    if (needsVerification && verificationCode) {
       sendVerificationEmail({ to: user.email, name: user.name, code: verificationCode })
         .catch(err => console.warn('Verification email failed:', err.message));
     }
 
-    const message = userRole === 'donor'
-      ? 'Account created! Welcome to HopeBridge.'
-      : 'Account created! Please check your email for the verification code.';
+    const message = needsVerification
+      ? 'Account created! Please check your email for the verification code.'
+      : 'Account created! Welcome to HopeBridge.';
 
     res.status(201).json({
       message,
       token,
+      needsVerification,
       user: {
         id: user.id,
         name: user.name,
@@ -98,7 +125,9 @@ const register = async (req, res, next) => {
         isVerified: user.is_verified,
       },
     });
-  } catch (err) { next(err); }
+  } catch (err) { 
+    next(err); 
+  }
 };
 
 // POST /api/auth/login
@@ -119,8 +148,11 @@ const login = async (req, res, next) => {
       return res.status(403).json({ error: 'Your account has been deactivated.' });
     }
 
-    // Creators require email verification; donors and admins don't
-    if (user.role === 'creator' && !user.is_verified) {
+    // Check if verification is required from settings
+    const verificationEnabled = await getSetting('email_verification_enabled');
+    
+    // Only require verification if enabled AND user is not verified
+    if (verificationEnabled === 'true' && !user.is_verified) {
       return res.status(403).json({
         error: 'Please verify your email address before logging in.',
         needsVerification: true,
@@ -139,7 +171,9 @@ const login = async (req, res, next) => {
       token,
       user: { id: user.id, name: user.name, email: user.email, role: user.role },
     });
-  } catch (err) { next(err); }
+  } catch (err) { 
+    next(err); 
+  }
 };
 
 // GET /api/auth/me
@@ -153,7 +187,9 @@ const getMe = async (req, res, next) => {
       return res.status(404).json({ error: 'User not found.' });
     }
     res.json({ user: result.rows[0] });
-  } catch (err) { next(err); }
+  } catch (err) { 
+    next(err); 
+  }
 };
 
 // PATCH /api/auth/me (update profile)
@@ -165,7 +201,9 @@ const updateMe = async (req, res, next) => {
       [name.trim(), req.user.id]
     );
     res.json({ user: result.rows[0] });
-  } catch (err) { next(err); }
+  } catch (err) { 
+    next(err); 
+  }
 };
 
 // POST /api/auth/verify-code
@@ -198,8 +236,22 @@ const verifyCode = async (req, res, next) => {
       [user.id]
     );
 
-    res.json({ message: 'Email verified successfully! You can now log in.' });
-  } catch (err) { next(err); }
+    // Generate token after verification so user can login immediately
+    const updatedUser = await pool.query(
+      'SELECT id, name, email, role, is_verified, is_active FROM users WHERE id = $1',
+      [user.id]
+    );
+    
+    const token = signToken(updatedUser.rows[0]);
+
+    res.json({ 
+      message: 'Email verified successfully! You can now log in.',
+      token,
+      user: updatedUser.rows[0]
+    });
+  } catch (err) { 
+    next(err); 
+  }
 };
 
 // POST /api/auth/resend-code
@@ -226,7 +278,31 @@ const resendCode = async (req, res, next) => {
     sendVerificationEmail({ to: email, name: user.name, code })
       .catch(err => console.warn('Resend verification email failed:', err.message));
     res.json({ message: 'Verification code resent.' });
-  } catch (err) { next(err); }
+  } catch (err) { 
+    next(err); 
+  }
+};
+
+// POST /api/auth/save-pending-donation - Save donation for after login
+const savePendingDonation = async (req, res, next) => {
+  try {
+    const { campaignId, amount, message, isMonthly } = req.body;
+    // Store in session or return a token
+    // For now, just return success - frontend will store in sessionStorage
+    res.json({ success: true });
+  } catch (err) {
+    next(err);
+  }
+};
+
+// GET /api/auth/pending-donation - Get pending donation after login
+const getPendingDonation = async (req, res, next) => {
+  try {
+    // This is handled on frontend with sessionStorage
+    res.json({ pending: null });
+  } catch (err) {
+    next(err);
+  }
 };
 
 const verifyEmail = async (req, res) => {
@@ -241,4 +317,8 @@ module.exports = {
   verifyEmail,
   verifyCode,
   resendCode,
+  getVerificationStatus,
+  checkSession,
+  savePendingDonation,
+  getPendingDonation,
 };

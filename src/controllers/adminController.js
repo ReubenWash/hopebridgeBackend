@@ -32,7 +32,7 @@ const getStats = async (req, res, next) => {
 const getAllUsers = async (req, res, next) => {
   try {
     const result = await pool.query(
-      'SELECT id, name, email, role, is_active, created_at FROM users ORDER BY created_at DESC'
+      'SELECT id, name, email, role, is_active, is_verified, created_at FROM users ORDER BY created_at DESC'
     );
     res.json({ users: result.rows });
   } catch (err) { next(err); }
@@ -230,7 +230,7 @@ const sendMassMail = async (req, res, next) => {
   } catch (err) { next(err); }
 };
 
-// ── FCM Token ────────────────────────────────────────────────────────
+// ── FCM Token (User push notifications) ─────────────────────────────
 const saveFCMToken = async (req, res, next) => {
   try {
     const { token } = req.body;
@@ -243,11 +243,269 @@ const saveFCMToken = async (req, res, next) => {
   } catch (err) { next(err); }
 };
 
+// ── Email Verification Settings ─────────────────────────────────────
+const getVerificationSetting = async (req, res, next) => {
+  try {
+    const result = await pool.query(
+      "SELECT value FROM settings WHERE key = 'email_verification_enabled'"
+    );
+    const enabled = result.rows.length ? result.rows[0].value === 'true' : true;
+    res.json({ enabled });
+  } catch (err) { next(err); }
+};
+
+const updateVerificationSetting = async (req, res, next) => {
+  try {
+    const { enabled } = req.body;
+    await pool.query(
+      `INSERT INTO settings (key, value) VALUES ('email_verification_enabled', $1)
+       ON CONFLICT (key) DO UPDATE SET value = EXCLUDED.value`,
+      [enabled ? 'true' : 'false']
+    );
+    res.json({ 
+      message: `Email verification ${enabled ? 'enabled' : 'disabled'}`, 
+      enabled 
+    });
+  } catch (err) { next(err); }
+};
+
+// ── Admin FCM Tokens (for sending push notifications to admins) ─────
+const saveAdminFCMToken = async (req, res, next) => {
+  try {
+    const { token } = req.body;
+    const adminId = req.user.id;
+    
+    // Verify user is admin
+    const adminCheck = await pool.query(
+      'SELECT role FROM users WHERE id = $1',
+      [adminId]
+    );
+    
+    if (adminCheck.rows.length === 0 || adminCheck.rows[0].role !== 'admin') {
+      return res.status(403).json({ error: 'Only admins can save admin FCM tokens' });
+    }
+    
+    await pool.query(
+      `INSERT INTO admin_fcm_tokens (admin_id, token) VALUES ($1, $2)
+       ON CONFLICT (admin_id, token) DO NOTHING`,
+      [adminId, token]
+    );
+    
+    res.json({ message: 'Admin FCM token saved successfully' });
+  } catch (err) { next(err); }
+};
+
+const getAdminFCMTokens = async (req, res, next) => {
+  try {
+    const result = await pool.query(
+      'SELECT token FROM admin_fcm_tokens'
+    );
+    res.json({ tokens: result.rows.map(r => r.token) });
+  } catch (err) { next(err); }
+};
+
+const removeAdminFCMToken = async (req, res, next) => {
+  try {
+    const { token } = req.body;
+    const adminId = req.user.id;
+    
+    await pool.query(
+      'DELETE FROM admin_fcm_tokens WHERE admin_id = $1 AND token = $2',
+      [adminId, token]
+    );
+    
+    res.json({ message: 'Admin FCM token removed' });
+  } catch (err) { next(err); }
+};
+
+// ── Firebase Settings ───────────────────────────────────────────────
+const getFirebaseSettings = async (req, res, next) => {
+  try {
+    const result = await pool.query(
+      "SELECT key, value FROM settings WHERE key IN ('firebase_server_key', 'firebase_sender_id')"
+    );
+    const settings = {};
+    for (const row of result.rows) {
+      settings[row.key] = row.value;
+    }
+    res.json({ settings });
+  } catch (err) { next(err); }
+};
+
+const saveFirebaseSettings = async (req, res, next) => {
+  try {
+    const { serverKey, senderId } = req.body;
+    const client = await pool.connect();
+    try {
+      await client.query('BEGIN');
+      
+      if (serverKey !== undefined) {
+        await client.query(
+          `INSERT INTO settings (key, value) VALUES ('firebase_server_key', $1)
+           ON CONFLICT (key) DO UPDATE SET value = EXCLUDED.value`,
+          [serverKey]
+        );
+      }
+      
+      if (senderId !== undefined) {
+        await client.query(
+          `INSERT INTO settings (key, value) VALUES ('firebase_sender_id', $1)
+           ON CONFLICT (key) DO UPDATE SET value = EXCLUDED.value`,
+          [senderId]
+        );
+      }
+      
+      await client.query('COMMIT');
+      res.json({ message: 'Firebase settings saved successfully' });
+    } catch (e) {
+      await client.query('ROLLBACK');
+      throw e;
+    } finally {
+      client.release();
+    }
+  } catch (err) { next(err); }
+};
+
+// ── ImageKit.io Settings ────────────────────────────────────────────
+const getImageKitSettings = async (req, res, next) => {
+  try {
+    const result = await pool.query(
+      "SELECT key, value FROM settings WHERE key IN ('imagekit_public_key', 'imagekit_private_key', 'imagekit_url_endpoint')"
+    );
+    const settings = {};
+    for (const row of result.rows) {
+      settings[row.key] = row.value;
+    }
+    res.json({ settings });
+  } catch (err) { next(err); }
+};
+
+const saveImageKitSettings = async (req, res, next) => {
+  try {
+    const { publicKey, privateKey, urlEndpoint } = req.body;
+    const client = await pool.connect();
+    try {
+      await client.query('BEGIN');
+      
+      if (publicKey !== undefined) {
+        await client.query(
+          `INSERT INTO settings (key, value) VALUES ('imagekit_public_key', $1)
+           ON CONFLICT (key) DO UPDATE SET value = EXCLUDED.value`,
+          [publicKey]
+        );
+      }
+      
+      if (privateKey !== undefined) {
+        await client.query(
+          `INSERT INTO settings (key, value) VALUES ('imagekit_private_key', $1)
+           ON CONFLICT (key) DO UPDATE SET value = EXCLUDED.value`,
+          [privateKey]
+        );
+      }
+      
+      if (urlEndpoint !== undefined) {
+        await client.query(
+          `INSERT INTO settings (key, value) VALUES ('imagekit_url_endpoint', $1)
+           ON CONFLICT (key) DO UPDATE SET value = EXCLUDED.value`,
+          [urlEndpoint]
+        );
+      }
+      
+      await client.query('COMMIT');
+      res.json({ message: 'ImageKit.io settings saved successfully' });
+    } catch (e) {
+      await client.query('ROLLBACK');
+      throw e;
+    } finally {
+      client.release();
+    }
+  } catch (err) { next(err); }
+};
+
+// ── Send Test Push Notification to Admin ────────────────────────────
+const sendTestPushNotification = async (req, res, next) => {
+  try {
+    const { title, body } = req.body;
+    
+    // Get all admin FCM tokens
+    const tokensResult = await pool.query(
+      'SELECT token FROM admin_fcm_tokens'
+    );
+    
+    const tokens = tokensResult.rows.map(r => r.token);
+    
+    if (tokens.length === 0) {
+      return res.status(400).json({ error: 'No admin FCM tokens found' });
+    }
+    
+    // Get Firebase server key from settings
+    const firebaseKeyResult = await pool.query(
+      "SELECT value FROM settings WHERE key = 'firebase_server_key'"
+    );
+    
+    const serverKey = firebaseKeyResult.rows.length 
+      ? firebaseKeyResult.rows[0].value 
+      : process.env.FIREBASE_SERVER_KEY;
+    
+    if (!serverKey) {
+      return res.status(400).json({ error: 'Firebase server key not configured' });
+    }
+    
+    // Send push notification via Firebase
+    const fetch = require('node-fetch');
+    const response = await fetch('https://fcm.googleapis.com/fcm/send', {
+      method: 'POST',
+      headers: {
+        'Content-Type': 'application/json',
+        'Authorization': `key=${serverKey}`,
+      },
+      body: JSON.stringify({
+        registration_ids: tokens,
+        notification: {
+          title: title || 'Test Notification',
+          body: body || 'This is a test push notification from HopeBridge Admin',
+          icon: '/logo192.png',
+          click_action: '/admin-dashboard',
+        },
+        data: {
+          screen: 'admin-dashboard',
+        },
+      }),
+    });
+    
+    const data = await response.json();
+    res.json({ 
+      message: `Notification sent to ${tokens.length} admin devices`,
+      response: data 
+    });
+  } catch (err) { 
+    next(err); 
+  }
+};
+
 module.exports = {
-  getStats, getAllUsers, toggleUserActive,
-  getDisputes, createDispute, resolveDispute,
-  getTheme, saveTheme,
-  getSettings, saveSettings,
-  getContent, saveContent,
-  sendMassMail, saveFCMToken,
+  getStats, 
+  getAllUsers, 
+  toggleUserActive,
+  getDisputes, 
+  createDispute, 
+  resolveDispute,
+  getTheme, 
+  saveTheme,
+  getSettings, 
+  saveSettings,
+  getContent, 
+  saveContent,
+  sendMassMail, 
+  saveFCMToken,
+  getVerificationSetting,
+  updateVerificationSetting,
+  saveAdminFCMToken,
+  getAdminFCMTokens,
+  removeAdminFCMToken,
+  getFirebaseSettings,
+  saveFirebaseSettings,
+  getImageKitSettings,
+  saveImageKitSettings,
+  sendTestPushNotification,
 };

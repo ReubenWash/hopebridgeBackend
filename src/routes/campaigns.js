@@ -1,8 +1,15 @@
 const router = require('express').Router()
 const { body } = require('express-validator')
 const {
-  getAllCampaigns, getCampaign, createCampaign,
-  updateCampaign, deleteCampaign, getMyCampaigns,
+  getAllCampaigns, 
+  getCampaign,
+  getCampaignUpdates,
+  addCampaignUpdate,
+  getRelatedCampaigns,
+  createCampaign,
+  updateCampaign, 
+  deleteCampaign, 
+  getMyCampaigns,
   requestCampaignCompletion,
 } = require('../controllers/campaignController')
 const { authenticate, requireCreator } = require('../middleware/auth')
@@ -15,11 +22,13 @@ const campaignValidation = [
   body('category').optional().isLength({ max: 80 }),
 ]
 
+const updateValidation = [
+  body('title').optional().trim().isLength({ max: 200 }),
+  body('title').optional().notEmpty().withMessage('Title cannot be empty'),
+  body('goal').optional().isFloat({ min: 10 }).withMessage('Goal must be at least $10'),
+]
+
 // ── Upload with timeout ───────────────────────────
-// Koyeb free tier has a 30s gateway timeout.
-// 28s here gives us a clean error message before Koyeb kills it.
-// With the 5MB multer limit in cloudinary.js, most uploads
-// should complete in 3-8s — this is just a safety net.
 const uploadWithTimeout = (req, res, next) => {
   const timer = setTimeout(() => {
     next(new Error('Image upload timed out. Please use a JPG or PNG under 5MB.'))
@@ -28,7 +37,6 @@ const uploadWithTimeout = (req, res, next) => {
   upload.single('image')(req, res, (err) => {
     clearTimeout(timer)
     if (err) {
-      // Multer file size error — friendly message
       if (err.code === 'LIMIT_FILE_SIZE') {
         return next(new Error('Image too large. Please use a file under 5MB.'))
       }
@@ -39,9 +47,11 @@ const uploadWithTimeout = (req, res, next) => {
 }
 
 // ── Public ───────────────────────────────────────
-router.get('/',    getAllCampaigns)
-router.get('/my',  authenticate, requireCreator, getMyCampaigns)
+router.get('/', getAllCampaigns)
+router.get('/my', authenticate, requireCreator, getMyCampaigns)
 router.get('/:id', getCampaign)
+router.get('/:id/updates', getCampaignUpdates)
+router.get('/:id/related', getRelatedCampaigns)
 
 // ── Creator ──────────────────────────────────────
 router.post('/',
@@ -51,10 +61,20 @@ router.post('/',
   createCampaign
 )
 
+router.post('/:id/updates',
+  authenticate, requireCreator,
+  [
+    body('title').trim().notEmpty().withMessage('Title is required'),
+    body('content').trim().notEmpty().withMessage('Content is required'),
+  ],
+  validate,
+  addCampaignUpdate
+)
+
 router.patch('/:id',
   authenticate, requireCreator,
   uploadWithTimeout,
-  campaignValidation, validate,
+  updateValidation, validate,
   updateCampaign
 )
 

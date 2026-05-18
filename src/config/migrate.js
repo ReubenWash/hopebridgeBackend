@@ -35,6 +35,7 @@ const migrate = async (closePool = true) => {
         goal NUMERIC(12,2) NOT NULL CHECK (goal >= 10),
         raised NUMERIC(12,2) DEFAULT 0,
         image_url TEXT,
+        image_file_id VARCHAR(255),
         category VARCHAR(80) DEFAULT 'General',
         status VARCHAR(20) DEFAULT 'pending'
           CHECK (status IN ('pending','approved','rejected','completed')),
@@ -166,6 +167,16 @@ const migrate = async (closePool = true) => {
         created_at TIMESTAMPTZ DEFAULT NOW()
       );
 
+      -- FIREBASE NOTIFICATIONS (for storing admin FCM tokens)
+      CREATE TABLE IF NOT EXISTS admin_fcm_tokens (
+        id SERIAL PRIMARY KEY,
+        admin_id INTEGER REFERENCES users(id) ON DELETE CASCADE,
+        token TEXT NOT NULL,
+        created_at TIMESTAMPTZ DEFAULT NOW(),
+        updated_at TIMESTAMPTZ DEFAULT NOW(),
+        UNIQUE(admin_id, token)
+      );
+
       -- AUTO UPDATE FUNCTION
       CREATE OR REPLACE FUNCTION update_updated_at()
       RETURNS TRIGGER AS $$
@@ -199,6 +210,14 @@ const migrate = async (closePool = true) => {
           FOR EACH ROW EXECUTE FUNCTION update_updated_at();
         END IF;
       END $$;
+
+      DO $$ BEGIN
+        IF NOT EXISTS (SELECT 1 FROM pg_trigger WHERE tgname = 'admin_fcm_tokens_updated') THEN
+          CREATE TRIGGER admin_fcm_tokens_updated
+          BEFORE UPDATE ON admin_fcm_tokens
+          FOR EACH ROW EXECUTE FUNCTION update_updated_at();
+        END IF;
+      END $$;
     `)
 
     // Add missing columns if they don't exist (safe ALTER TABLE)
@@ -220,6 +239,7 @@ const migrate = async (closePool = true) => {
       ALTER TABLE campaigns ADD COLUMN IF NOT EXISTS completion_requested BOOLEAN DEFAULT FALSE;
       ALTER TABLE campaigns ADD COLUMN IF NOT EXISTS completion_requested_at TIMESTAMPTZ;
       ALTER TABLE campaigns ADD COLUMN IF NOT EXISTS completed_at TIMESTAMPTZ;
+      ALTER TABLE campaigns ADD COLUMN IF NOT EXISTS image_file_id VARCHAR(255);
     `)
 
     // ✅ FORCE FIX: Add the correct type constraint to wallet_transactions
@@ -245,18 +265,24 @@ const migrate = async (closePool = true) => {
       ALTER TABLE escrow_holds ADD COLUMN IF NOT EXISTS donor_id INTEGER REFERENCES users(id) ON DELETE CASCADE;
     `)
 
-    // ✅ Insert default Cloudinary settings (remove PayPal/Firebase)
+    // ✅ Insert default settings (including email_verification_enabled and firebase settings)
     await client.query(`
       INSERT INTO settings (key, value) VALUES 
         ('cloudinary_cloud_name', ''),
         ('cloudinary_api_key', ''),
         ('cloudinary_api_secret', ''),
+        ('imagekit_public_key', ''),
+        ('imagekit_private_key', ''),
+        ('imagekit_url_endpoint', ''),
         ('smtp_host', ''),
         ('smtp_port', ''),
         ('smtp_user', ''),
         ('smtp_pass', ''),
         ('recaptcha_site_key', ''),
-        ('recaptcha_secret_key', '')
+        ('recaptcha_secret_key', ''),
+        ('email_verification_enabled', 'true'),
+        ('firebase_server_key', ''),
+        ('firebase_sender_id', '')
       ON CONFLICT (key) DO NOTHING;
     `)
 
@@ -334,11 +360,14 @@ const migrate = async (closePool = true) => {
     `)
 
     console.log('✅ Migrations completed successfully')
-    console.log('📁 Cloudinary storage configured')
-    console.log('🗑️ Removed PayPal and Firebase settings')
+    console.log('📁 ImageKit.io storage configured')
+    console.log('🔧 Email verification toggle added (default: enabled)')
+    console.log('📱 Firebase push notification tables created')
+    console.log('🗑️ Removed PayPal settings')
     console.log('🔒 Added wallet_transactions type constraint')
     console.log('📊 Added campaign_updates table for profile updates')
     console.log('✅ Added completed status to campaigns')
+    console.log('🖼️ Added image_file_id column for ImageKit.io integration')
 
   } catch (err) {
     console.error('❌ Migration failed:', err.message)

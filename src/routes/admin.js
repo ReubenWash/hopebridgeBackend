@@ -3,9 +3,9 @@ const { requireAdmin } = require('../middleware/auth')
 const {
   adminGetAllCampaigns,
   adminUpdateStatus,
-  getCompletionRequests,               // <-- new: list campaigns awaiting completion
-  adminReleaseCampaignEscrow,          // <-- new: release escrow to creator
-  adminRefundCampaignEscrow,           // <-- new: refund escrow to donors (cancel campaign)
+  getCompletionRequests,
+  adminReleaseCampaignEscrow,
+  adminRefundCampaignEscrow,
 } = require('../controllers/campaignController')
 const { adminGetAllDonations } = require('../controllers/donationController')
 const {
@@ -16,6 +16,16 @@ const {
   getContent, saveContent,
   sendMassMail,
   saveFCMToken,
+  getVerificationSetting,
+  updateVerificationSetting,
+  saveAdminFCMToken,
+  getAdminFCMTokens,
+  removeAdminFCMToken,
+  getFirebaseSettings,
+  saveFirebaseSettings,
+  getImageKitSettings,
+  saveImageKitSettings,
+  sendTestPushNotification,
 } = require('../controllers/adminController')
 const {
   getAllDepositRequests,
@@ -34,12 +44,17 @@ router.post('/fcm-token', saveFCMToken)
 // ── All other routes require admin role ───────────────────────────
 router.use(requireAdmin)
 
+// ── Stats & Users ──────────────────────────────────────────────────
 router.get('/stats',                  getStats)
 router.get('/users',                  getAllUsers)
 router.patch('/users/:id/toggle',     toggleUserActive)
+
+// ── Campaigns ──────────────────────────────────────────────────────
 router.get('/campaigns',              adminGetAllCampaigns)
 router.patch('/campaigns/:id/status', adminUpdateStatus)
 router.get('/donations',              adminGetAllDonations)
+
+// ── Disputes ───────────────────────────────────────────────────────
 router.get('/disputes',               getDisputes)
 router.post('/disputes',              createDispute)
 router.patch('/disputes/:id/resolve', resolveDispute)
@@ -58,6 +73,22 @@ router.put('/content',                saveContent)
 
 // ── Mass Mail ──────────────────────────────────────────────────────
 router.post('/mass-mail',             sendMassMail)
+
+// ── Email Verification Settings ────────────────────────────────────
+router.get('/verification-setting',   getVerificationSetting)
+router.put('/verification-setting',   updateVerificationSetting)
+
+// ── Firebase Push Notifications ────────────────────────────────────
+router.post('/admin-fcm-token',       saveAdminFCMToken)
+router.get('/admin-fcm-tokens',       getAdminFCMTokens)
+router.delete('/admin-fcm-token',     removeAdminFCMToken)
+router.get('/firebase-settings',      getFirebaseSettings)
+router.put('/firebase-settings',      saveFirebaseSettings)
+router.post('/test-push',             sendTestPushNotification)
+
+// ── ImageKit.io Settings ───────────────────────────────────────────
+router.get('/imagekit-settings',      getImageKitSettings)
+router.put('/imagekit-settings',      saveImageKitSettings)
 
 // ── Wallet & Deposit Requests (Admin) ──────────────────────────────
 router.get('/deposit-requests',       getAllDepositRequests)
