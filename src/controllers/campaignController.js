@@ -19,19 +19,10 @@ const ensureAbsoluteImageUrl = (url, req) => {
 };
 
 // Helper to upload image to ImageKit.io
+// Helper to upload image to ImageKit.io
 const uploadCampaignImage = async (file, existingImageId = null) => {
   try {
-    // Check if ImageKit is configured
-    const publicKey = await getSetting('imagekit_public_key');
-    const privateKey = await getSetting('imagekit_private_key');
-    const urlEndpoint = await getSetting('imagekit_url_endpoint');
-    
-    const isImageKitConfigured = publicKey && privateKey && urlEndpoint;
-    
-    if (!isImageKitConfigured) {
-      console.warn('⚠️ ImageKit.io not configured, using fallback');
-      return { url: null, fileId: null, usingFallback: true };
-    }
+    console.log('📤 Starting ImageKit upload process...');
     
     // Delete old image if exists
     if (existingImageId) {
@@ -43,8 +34,28 @@ const uploadCampaignImage = async (file, existingImageId = null) => {
       }
     }
     
-    const fileName = `${Date.now()}-${Math.round(Math.random() * 1e9)}.jpg`;
-    const uploadResult = await uploadToImageKit(file.buffer, fileName, 'hopebridge/campaigns');
+    // Get file buffer - handle different multer setups
+    let fileBuffer;
+    let originalName;
+    
+    if (file.buffer) {
+      fileBuffer = file.buffer;
+      originalName = file.originalname;
+    } else if (file.path) {
+      const fs = require('fs');
+      fileBuffer = fs.readFileSync(file.path);
+      originalName = file.originalname;
+    } else {
+      throw new Error('No file buffer or path available');
+    }
+    
+    // Get file extension
+    const extension = originalName?.split('.').pop() || 'png';
+    const fileName = `${Date.now()}-${Math.round(Math.random() * 1e9)}.${extension}`;
+    
+    console.log('📤 Uploading to ImageKit.io:', { fileName, size: fileBuffer.length });
+    
+    const uploadResult = await uploadToImageKit(fileBuffer, fileName, 'hopebridge/campaigns');
     
     if (uploadResult && uploadResult.url) {
       console.log('✅ Image uploaded to ImageKit.io:', uploadResult.url);
@@ -58,14 +69,7 @@ const uploadCampaignImage = async (file, existingImageId = null) => {
     }
   } catch (err) {
     console.error('❌ Image upload error:', err.message);
-    
-    // Fallback: try to use file path if available (for local/cloudinary)
-    if (file.path || file.secure_url) {
-      const fallbackUrl = file.path || file.secure_url;
-      console.log('🔄 Using fallback image URL:', fallbackUrl);
-      return { url: fallbackUrl, fileId: null, usingFallback: true };
-    }
-    
+    console.log('⚠️ Using fallback (no image will be saved)');
     return { url: null, fileId: null, usingFallback: true };
   }
 };
