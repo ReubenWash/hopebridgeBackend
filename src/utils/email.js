@@ -1,7 +1,37 @@
-const { Resend } = require('resend')
+const nodemailer = require('nodemailer')
 
-const resend = new Resend(process.env.RESEND_API_KEY)
-const FROM   = process.env.FROM_EMAIL || 'onboarding@resend.dev'
+// ── Transporter ──────────────────────────────────
+// Reads directly from env vars — no DB lookup.
+// Set these in Koyeb:
+//   SMTP_HOST  = smtp.sendgrid.net
+//   SMTP_PORT  = 587
+//   SMTP_USER  = apikey
+//   SMTP_PASS  = SG.xxxxxxxxxxxxxxxx
+//   FROM_EMAIL = your_verified_sender@gmail.com
+const createTransporter = () =>
+  nodemailer.createTransport({
+    host:   process.env.SMTP_HOST || 'smtp.sendgrid.net',
+    port:   parseInt(process.env.SMTP_PORT || '587'),
+    secure: false, // TLS on port 587
+    auth: {
+      user: process.env.SMTP_USER || 'apikey',
+      pass: process.env.SMTP_PASS,
+    },
+  })
+
+const FROM = process.env.FROM_EMAIL || process.env.SMTP_USER || 'noreply@hopebridge.org'
+
+// ── Core send helper ─────────────────────────────
+async function send({ to, subject, html }) {
+  try {
+    const transporter = createTransporter()
+    await transporter.sendMail({ from: `"HopeBridge" <${FROM}>`, to, subject, html })
+    console.log(`📧 Email sent to ${to}: ${subject}`)
+  } catch (err) {
+    // Never crash the app over a failed email
+    console.error('❌ Email failed:', err.message)
+  }
+}
 
 // ── HTML wrapper ─────────────────────────────────
 const htmlWrap = (body) => `
@@ -33,20 +63,6 @@ const htmlWrap = (body) => `
   </div>
 </body>
 </html>`
-
-// ── Core send helper ─────────────────────────────
-async function send({ to, subject, html }) {
-  try {
-    const { error } = await resend.emails.send({ from: FROM, to, subject, html })
-    if (error) {
-      console.error('❌ Resend error:', error)
-      throw new Error(error.message)
-    }
-  } catch (err) {
-    // Never crash the app over a failed email
-    console.error('❌ Email failed:', err.message)
-  }
-}
 
 // ── Templates ────────────────────────────────────
 
@@ -230,8 +246,6 @@ async function sendWithdrawalStatusEmail({ to, userName, amount, status, adminNo
 }
 
 // ── Mass mail ────────────────────────────────────
-// Resend doesn't support BCC bulk sending on free tier.
-// This sends individually to each recipient.
 async function sendMassEmail({ to, subject, text }) {
   if (!to || to.length === 0) throw new Error('No recipients provided')
   const html = htmlWrap(`<p>${text.replace(/\n/g, '<br>')}</p>`)
