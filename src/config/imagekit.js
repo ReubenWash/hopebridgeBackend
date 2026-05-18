@@ -1,10 +1,9 @@
-// config/imagekit.js
+// config/imagekit.js - CORRECTED VERSION
 const ImageKit = require('@imagekit/nodejs');
 
 let imagekitInstance = null;
 
 const getImageKit = () => {
-  // First try environment variables
   const publicKey = process.env.IMAGEKIT_PUBLIC_KEY;
   const privateKey = process.env.IMAGEKIT_PRIVATE_KEY;
   const urlEndpoint = process.env.IMAGEKIT_URL_ENDPOINT;
@@ -20,10 +19,11 @@ const getImageKit = () => {
   }
   
   if (!imagekitInstance) {
+    // CORRECT: The SDK exports a class directly
     imagekitInstance = new ImageKit({
-      publicKey,
-      privateKey,
-      urlEndpoint,
+      publicKey: publicKey,
+      privateKey: privateKey,
+      urlEndpoint: urlEndpoint,
     });
     console.log('✅ ImageKit.io initialized successfully');
   }
@@ -39,16 +39,20 @@ const uploadToImageKit = async (fileBuffer, fileName, folder = 'hopebridge/campa
   
   try {
     console.log(`📤 Uploading to ImageKit: ${fileName} (${fileBuffer.length} bytes)`);
+    
+    // CORRECT: The SDK uses .upload() method
     const result = await imagekit.upload({
       file: fileBuffer,
       fileName: fileName,
       folder: folder,
       useUniqueFileName: true,
     });
+    
     console.log('✅ ImageKit upload successful:', result.url);
     return result;
   } catch (error) {
     console.error('❌ ImageKit upload error:', error.message);
+    console.error('Error details:', error);
     throw error;
   }
 };
