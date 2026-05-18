@@ -194,6 +194,14 @@ const createCampaign = async (req, res, next) => {
   try {
     const { title, description, goal, category = 'General' } = req.body;
     
+    // Validation
+    if (!title || !title.trim()) {
+      return res.status(400).json({ error: 'Campaign title is required' });
+    }
+    if (!goal || parseFloat(goal) < 10) {
+      return res.status(400).json({ error: 'Campaign goal must be at least $10' });
+    }
+    
     let image_url = null;
     let image_file_id = null;
 
@@ -203,28 +211,29 @@ const createCampaign = async (req, res, next) => {
       if (uploadResult.url) {
         image_url = uploadResult.url;
         image_file_id = uploadResult.fileId;
-        console.log('Image uploaded to ImageKit.io:', image_url);
-      } else if (req.file.path) {
-        // Fallback to Cloudinary or local
-        image_url = req.file.path || req.file.secure_url;
-        console.log('Image uploaded via fallback:', image_url);
       }
-    } else if (req.body.image_url) {
-      image_url = req.body.image_url;
+    } else if (req.body.image_url && req.body.image_url.trim()) {
+      image_url = req.body.image_url.trim();
+      console.log('Using provided image URL:', image_url);
     }
 
-    console.log('Creating campaign:', { title, goal, category, image_url });
+    console.log('📝 Creating campaign:', { 
+      title: title.trim(), 
+      goal: parseFloat(goal), 
+      category, 
+      hasImage: !!image_url 
+    });
 
     const result = await pool.query(`
       INSERT INTO campaigns (creator_id, title, description, goal, image_url, category, image_file_id)
       VALUES ($1, $2, $3, $4, $5, $6, $7)
       RETURNING *
-    `, [req.user.id, title.trim(), description?.trim(), parseFloat(goal), image_url, category, image_file_id]);
+    `, [req.user.id, title.trim(), description?.trim() || null, parseFloat(goal), image_url, category, image_file_id]);
 
     const campaign = result.rows[0];
-    console.log('Campaign created:', campaign.id);
+    console.log('✅ Campaign created successfully, ID:', campaign.id);
 
-    // Notify admin by email
+    // Notify admin by email (don't await, let it run in background)
     const adminRes = await pool.query("SELECT email FROM users WHERE role = 'admin' LIMIT 1");
     if (adminRes.rows.length > 0) {
       sendNewCampaignAdminAlert({
@@ -232,24 +241,154 @@ const createCampaign = async (req, res, next) => {
         creatorName: req.user.name,
         campaignTitle: campaign.title,
         campaignId: campaign.id,
-      }).catch(e => console.warn('Admin alert email failed:', e.message));
+      }).catch(e => console.warn('⚠️ Admin alert email failed:', e.message));
     }
 
     res.status(201).json({ 
-      message: 'Campaign submitted for review.', 
+      message: 'Campaign submitted for review successfully!', 
       campaign: {
-        ...campaign,
-        raised: parseFloat(campaign.raised) || 0,
+        id: campaign.id,
+        title: campaign.title,
+        description: campaign.description,
         goal: parseFloat(campaign.goal),
-        image_url: ensureAbsoluteImageUrl(campaign.image_url, req),
+        raised: 0,
+        image_url: image_url || null,
+        category: campaign.category,
+        status: campaign.status,
+        created_at: campaign.created_at,
       },
     });
   } catch (err) {
-    console.error('Create campaign error:', err);
+    console.error('❌ Create campaign error:', err);
     next(err);
   }
 };
 
+// PATCH /api/campaigns/:id — creator only, only if pending (UPDATED for ImageKit.io)
+const updateCampaign = async (req, res, next) => {
+  try {
+    const { id } = req.params;
+    
+    // Check if campaign exists and belongs to user
+    const existing = await pool.query(
+      'SELECT * FROM campaigns WHERE id = $1 AND creator_id = $2',
+      [id, req.user.id]
+    );
+    
+    if (existing.rows.length === 0) {
+      return res.status(404).json({ error: 'Campaign not found or you do not have permission to edit it.' });
+    }
+    
+    const existingCampaign = existing.rows[0];
+    
+    // Only allow editing of pending campaigns
+    if (existingCampaign.status !== 'pending') {
+      return res.status(403).json({ 
+        error: `Only pending campaigns can be edited. Current status: ${existingCampaign.status}` 
+      });
+    }
+
+    const { title, description, goal, category } = req.body;
+    
+    let image_url = existingCampaign.image_url;
+    let image_file_id = existingCampaign.image_file_id;
+
+    // Upload new image to ImageKit if provided
+    if (req.file) {
+      const uploadResult = await uploadCampaignImage(req.file, image_file_id);
+      if (uploadResult.url) {
+        image_url = uploadResult.url;
+        image_file_id = uploadResult.fileId;
+      }
+    } else if (req.body.image_url !== undefined) {
+      // Only update if explicitly provided (allow setting to null/empty)
+      image_url = req.body.image_url?.trim() || null;
+      // If clearing image and had an ImageKit ID, delete it
+      if (!image_url && image_file_id) {
+        try {
+          await deleteFromImageKit(image_file_id);
+          image_file_id = null;
+          console.log('🗑️ Image deleted from ImageKit.io for campaign:', id);
+        } catch (deleteErr) {
+          console.warn('Failed to delete image from ImageKit:', deleteErr.message);
+        }
+      }
+    }
+
+    // Build update query dynamically
+    const updates = [];
+    const values = [];
+    let paramCount = 1;
+    
+    if (title !== undefined) {
+      updates.push(`title = $${paramCount++}`);
+      values.push(title.trim());
+    }
+    if (description !== undefined) {
+      updates.push(`description = $${paramCount++}`);
+      values.push(description?.trim() || null);
+    }
+    if (goal !== undefined) {
+      updates.push(`goal = $${paramCount++}`);
+      values.push(parseFloat(goal));
+    }
+    if (category !== undefined) {
+      updates.push(`category = $${paramCount++}`);
+      values.push(category);
+    }
+    if (image_url !== undefined) {
+      updates.push(`image_url = $${paramCount++}`);
+      values.push(image_url);
+    }
+    if (image_file_id !== undefined) {
+      updates.push(`image_file_id = $${paramCount++}`);
+      values.push(image_file_id);
+    }
+    
+    if (updates.length === 0) {
+      return res.status(400).json({ error: 'No fields to update' });
+    }
+    
+    values.push(id);
+    values.push(req.user.id);
+    
+    const query = `
+      UPDATE campaigns
+      SET ${updates.join(', ')}
+      WHERE id = $${paramCount} AND creator_id = $${paramCount + 1}
+      RETURNING *
+    `;
+    
+    const result = await pool.query(query, values);
+
+    if (result.rows.length === 0) {
+      return res.status(404).json({ error: 'Campaign not found or update failed.' });
+    }
+
+    const updatedCampaign = result.rows[0];
+    
+    console.log('✅ Campaign updated successfully, ID:', id);
+
+    res.json({ 
+      message: 'Campaign updated successfully!', 
+      campaign: {
+        id: updatedCampaign.id,
+        title: updatedCampaign.title,
+        description: updatedCampaign.description,
+        goal: parseFloat(updatedCampaign.goal),
+        raised: parseFloat(updatedCampaign.raised) || 0,
+        image_url: updatedCampaign.image_url,
+        category: updatedCampaign.category,
+        status: updatedCampaign.status,
+        created_at: updatedCampaign.created_at,
+        updated_at: updatedCampaign.updated_at,
+      },
+    });
+  } catch (err) { 
+    console.error('❌ Update campaign error:', err);
+    next(err); 
+  }
+};
 // PATCH /api/campaigns/:id — creator only, only if pending (UPDATED for ImageKit.io)
 const updateCampaign = async (req, res, next) => {
   try {
