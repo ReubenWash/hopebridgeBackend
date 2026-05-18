@@ -207,6 +207,25 @@ const addCampaignUpdate = async (req, res, next) => {
 // POST /api/campaigns — creator only (UPDATED for ImageKit.io)
 const createCampaign = async (req, res, next) => {
   try {
+    console.log('===== BACKEND CREATE CAMPAIGN DEBUG =====')
+    console.log('Content-Type:', req.headers['content-type'])
+    console.log('req.file:', req.file)
+    console.log('req.body:', req.body)
+    console.log('req.files:', req.files)
+    
+    if (req.file) {
+      console.log('File details:', {
+        fieldname: req.file.fieldname,
+        originalname: req.file.originalname,
+        encoding: req.file.encoding,
+        mimetype: req.file.mimetype,
+        size: req.file.size,
+        hasBuffer: !!req.file.buffer,
+        bufferLength: req.file.buffer ? req.file.buffer.length : 0
+      })
+    }
+    console.log('========================================')
+    
     const { title, description, goal, category = 'General' } = req.body;
     
     // Validation
@@ -222,14 +241,20 @@ const createCampaign = async (req, res, next) => {
 
     // Upload to ImageKit if file exists
     if (req.file) {
+      console.log('📤 Attempting to upload file to ImageKit.io...')
       const uploadResult = await uploadCampaignImage(req.file);
       if (uploadResult.url) {
         image_url = uploadResult.url;
         image_file_id = uploadResult.fileId;
+        console.log('✅ Image uploaded successfully:', image_url)
+      } else {
+        console.log('⚠️ Image upload failed, using fallback')
       }
     } else if (req.body.image_url && req.body.image_url.trim()) {
       image_url = req.body.image_url.trim();
       console.log('Using provided image URL:', image_url);
+    } else {
+      console.log('No image provided for campaign')
     }
 
     console.log('📝 Creating campaign:', { 
