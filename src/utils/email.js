@@ -1,34 +1,9 @@
-const nodemailer = require('nodemailer')
-const pool = require('../config/db')   // assuming pool is exported
+const { Resend } = require('resend')
 
-// Helper: get SMTP settings from database
-async function getSmtpSettings() {
-  const res = await pool.query(
-    "SELECT key, value FROM settings WHERE key IN ('smtp_host', 'smtp_port', 'smtp_user', 'smtp_pass')"
-  )
-  const settings = {}
-  res.rows.forEach(row => { settings[row.key] = row.value })
-  // Fallback to environment variables if not set in DB
-  return {
-    host: settings.smtp_host || process.env.SMTP_HOST || 'smtp.gmail.com',
-    port: parseInt(settings.smtp_port || process.env.SMTP_PORT || 587),
-    user: settings.smtp_user || process.env.SMTP_USER,
-    pass: settings.smtp_pass || process.env.SMTP_PASS,
-  }
-}
+const resend = new Resend(process.env.RESEND_API_KEY)
+const FROM   = process.env.FROM_EMAIL || 'onboarding@resend.dev'
 
-// Helper: create a transporter from DB settings
-async function createTransporter() {
-  const { host, port, user, pass } = await getSmtpSettings()
-  return nodemailer.createTransport({
-    host,
-    port,
-    secure: port === 465,
-    auth: { user, pass },
-  })
-}
-
-// Base HTML email wrapper
+// ── HTML wrapper ─────────────────────────────────
 const htmlWrap = (body) => `
 <!DOCTYPE html>
 <html>
@@ -37,13 +12,13 @@ const htmlWrap = (body) => `
   <style>
     body { font-family: 'Open Sans', Arial, sans-serif; background: #f8f9fa; margin: 0; padding: 0; }
     .container { max-width: 580px; margin: 32px auto; background: #fff; border-radius: 12px; overflow: hidden; box-shadow: 0 4px 20px rgba(0,0,0,.08); }
-    .header { background: linear-gradient(135deg,#e8531e,#f47c50); padding: 32px 36px; color: #fff; }
+    .header { background: linear-gradient(135deg,#1D9E75,#0F6E56); padding: 32px 36px; color: #fff; }
     .header h1 { margin: 0; font-size: 1.5rem; }
     .header p  { margin: 6px 0 0; opacity: .85; font-size: .9rem; }
     .body { padding: 32px 36px; color: #444; line-height: 1.7; }
     .body h2 { color: #1a1a2e; margin-top: 0; }
-    .highlight { background: rgba(232,83,30,.08); border-left: 4px solid #e8531e; padding: 14px 18px; border-radius: 0 8px 8px 0; margin: 20px 0; }
-    .btn { display: inline-block; background: linear-gradient(135deg,#e8531e,#f47c50); color: #fff !important; text-decoration: none; padding: 13px 28px; border-radius: 6px; font-weight: 700; margin-top: 12px; }
+    .highlight { background: rgba(29,158,117,.08); border-left: 4px solid #1D9E75; padding: 14px 18px; border-radius: 0 8px 8px 0; margin: 20px 0; }
+    .btn { display: inline-block; background: linear-gradient(135deg,#1D9E75,#0F6E56); color: #fff !important; text-decoration: none; padding: 13px 28px; border-radius: 6px; font-weight: 700; margin-top: 12px; }
     .footer { background: #1a1a2e; padding: 20px 36px; color: rgba(255,255,255,.5); font-size: .82rem; text-align: center; }
   </style>
 </head>
@@ -59,12 +34,24 @@ const htmlWrap = (body) => `
 </body>
 </html>`
 
-// ── Core email templates ───────────────────────────────────────────
+// ── Core send helper ─────────────────────────────
+async function send({ to, subject, html }) {
+  try {
+    const { error } = await resend.emails.send({ from: FROM, to, subject, html })
+    if (error) {
+      console.error('❌ Resend error:', error)
+      throw new Error(error.message)
+    }
+  } catch (err) {
+    // Never crash the app over a failed email
+    console.error('❌ Email failed:', err.message)
+  }
+}
+
+// ── Templates ────────────────────────────────────
 
 async function sendWelcomeEmail({ to, name, role }) {
-  const transporter = await createTransporter()
-  await transporter.sendMail({
-    from: process.env.EMAIL_FROM || '"HopeBridge" <noreply@hopebridge.org>',
+  await send({
     to,
     subject: `Welcome to HopeBridge, ${name}! 🎉`,
     html: htmlWrap(`
@@ -79,9 +66,7 @@ async function sendWelcomeEmail({ to, name, role }) {
 }
 
 async function sendDonationConfirmation({ to, donorName, amount, campaignTitle }) {
-  const transporter = await createTransporter()
-  await transporter.sendMail({
-    from: process.env.EMAIL_FROM || '"HopeBridge" <noreply@hopebridge.org>',
+  await send({
     to,
     subject: `Thank you for your donation of $${amount}! 💛`,
     html: htmlWrap(`
@@ -99,10 +84,8 @@ async function sendDonationConfirmation({ to, donorName, amount, campaignTitle }
 }
 
 async function sendCampaignStatusEmail({ to, creatorName, campaignTitle, status }) {
-  const transporter = await createTransporter()
   const approved = status === 'approved'
-  await transporter.sendMail({
-    from: process.env.EMAIL_FROM || '"HopeBridge" <noreply@hopebridge.org>',
+  await send({
     to,
     subject: `Your campaign "${campaignTitle}" has been ${status}`,
     html: htmlWrap(`
@@ -110,7 +93,7 @@ async function sendCampaignStatusEmail({ to, creatorName, campaignTitle, status 
       <p>Dear <strong>${creatorName}</strong>,</p>
       <div class="highlight">
         Your campaign <strong>"${campaignTitle}"</strong> has been
-        <strong style="color:${approved ? '#27a96c' : '#e8531e'}">${status.toUpperCase()}</strong>.
+        <strong style="color:${approved ? '#1D9E75' : '#E24B4A'}">${status.toUpperCase()}</strong>.
       </div>
       ${approved
         ? '<p>Your campaign is now live and visible to donors. Share it with your network to start raising funds!</p>'
@@ -121,9 +104,7 @@ async function sendCampaignStatusEmail({ to, creatorName, campaignTitle, status 
 }
 
 async function sendNewCampaignAdminAlert({ adminEmail, creatorName, campaignTitle, campaignId }) {
-  const transporter = await createTransporter()
-  await transporter.sendMail({
-    from: process.env.EMAIL_FROM || '"HopeBridge" <noreply@hopebridge.org>',
+  await send({
     to: adminEmail,
     subject: `[Admin] New campaign pending review: "${campaignTitle}"`,
     html: htmlWrap(`
@@ -140,16 +121,14 @@ async function sendNewCampaignAdminAlert({ adminEmail, creatorName, campaignTitl
 }
 
 async function sendVerificationEmail({ to, name, code }) {
-  const transporter = await createTransporter()
-  await transporter.sendMail({
-    from: process.env.EMAIL_FROM || '"HopeBridge" <noreply@hopebridge.org>',
+  await send({
     to,
     subject: 'Your HopeBridge Verification Code',
     html: htmlWrap(`
       <h2>Hi ${name}!</h2>
       <p>Thank you for registering. Please enter the following code to verify your email address:</p>
       <div style="text-align:center; margin:24px 0;">
-        <span style="font-size:2rem; font-weight:700; letter-spacing:6px; color:#e8531e;">${code}</span>
+        <span style="font-size:2rem; font-weight:700; letter-spacing:6px; color:#1D9E75;">${code}</span>
       </div>
       <p>This code will expire in 15 minutes.</p>
     `),
@@ -157,9 +136,7 @@ async function sendVerificationEmail({ to, name, code }) {
 }
 
 async function sendNewDonationAdminAlert({ adminEmail, donorName, amount, campaignTitle, campaignId, paymentMethod }) {
-  const transporter = await createTransporter()
-  await transporter.sendMail({
-    from: process.env.EMAIL_FROM || '"HopeBridge" <noreply@hopebridge.org>',
+  await send({
     to: adminEmail,
     subject: `[New Donation] $${amount} received for "${campaignTitle}"`,
     html: htmlWrap(`
@@ -172,18 +149,15 @@ async function sendNewDonationAdminAlert({ adminEmail, donorName, amount, campai
         <strong>Payment Method:</strong> ${paymentMethod}<br>
         <strong>Campaign ID:</strong> #${campaignId}
       </div>
-      <p>Visit the <a href="${process.env.ADMIN_URL || 'https://hopebridge.org/admin'}" style="color:#e8531e;">admin dashboard</a> to see all recent donations.</p>
+      <p>Visit the <a href="${process.env.ADMIN_URL || 'https://hopebridge-inky.vercel.app/admin-dashboard'}" style="color:#1D9E75;">admin dashboard</a> to see all recent donations.</p>
     `),
   })
 }
 
-// ── Wallet-related email alerts ───────────────────────────────────
+// ── Wallet alerts ────────────────────────────────
 
-// Admin: new deposit request
 async function sendNewDepositRequestAlert({ adminEmail, userName, userEmail, amount, requestId }) {
-  const transporter = await createTransporter()
-  await transporter.sendMail({
-    from: process.env.EMAIL_FROM || '"HopeBridge" <noreply@hopebridge.org>',
+  await send({
     to: adminEmail,
     subject: `[Deposit Request] $${amount} from ${userName}`,
     html: htmlWrap(`
@@ -199,12 +173,9 @@ async function sendNewDepositRequestAlert({ adminEmail, userName, userEmail, amo
   })
 }
 
-// User: deposit request status update (approved/rejected)
-async function sendDepositStatusEmail({ to, userName, amount, status, adminNote, requestId }) {
-  const transporter = await createTransporter()
+async function sendDepositStatusEmail({ to, userName, amount, status, adminNote }) {
   const isApproved = status === 'approved'
-  await transporter.sendMail({
-    from: process.env.EMAIL_FROM || '"HopeBridge" <noreply@hopebridge.org>',
+  await send({
     to,
     subject: `Your deposit request of $${amount} has been ${status}`,
     html: htmlWrap(`
@@ -215,16 +186,16 @@ async function sendDepositStatusEmail({ to, userName, amount, status, adminNote,
         <strong>Status:</strong> ${status.toUpperCase()}
       </div>
       ${adminNote ? `<p><strong>Admin note:</strong> ${adminNote}</p>` : ''}
-      ${isApproved ? '<p>The amount has been credited to your wallet balance.</p>' : '<p>If you have questions, please contact support.</p>'}
+      ${isApproved
+        ? '<p>The amount has been credited to your wallet balance.</p>'
+        : '<p>If you have questions, please contact support.</p>'
+      }
     `),
   })
 }
 
-// Admin: new withdrawal request
 async function sendWithdrawalRequestAlert({ adminEmail, userName, userEmail, amount, withdrawalId }) {
-  const transporter = await createTransporter()
-  await transporter.sendMail({
-    from: process.env.EMAIL_FROM || '"HopeBridge" <noreply@hopebridge.org>',
+  await send({
     to: adminEmail,
     subject: `[Withdrawal Request] $${amount} from ${userName}`,
     html: htmlWrap(`
@@ -240,12 +211,9 @@ async function sendWithdrawalRequestAlert({ adminEmail, userName, userEmail, amo
   })
 }
 
-// User: withdrawal request status update (approved/rejected)
 async function sendWithdrawalStatusEmail({ to, userName, amount, status, adminNote }) {
-  const transporter = await createTransporter()
   const isApproved = status === 'approved' || status === 'paid'
-  await transporter.sendMail({
-    from: process.env.EMAIL_FROM || '"HopeBridge" <noreply@hopebridge.org>',
+  await send({
     to,
     subject: `Your withdrawal request of $${amount} has been ${status}`,
     html: htmlWrap(`
@@ -261,42 +229,28 @@ async function sendWithdrawalStatusEmail({ to, userName, amount, status, adminNo
   })
 }
 
-// ── Mass mail sender ─────────────────────────────────────────────
-async function sendMassEmail({ transporter: t, to, subject, text }) {
-  if (!t || !to || to.length === 0) throw new Error('Missing email parameters');
-
-  const massTransporter = nodemailer.createTransport({
-    host: t.host,
-    port: t.port,
-    secure: t.port === 465,
-    auth: {
-      user: t.user,
-      pass: t.pass,
-    },
-  });
-
-  await massTransporter.sendMail({
-    from: `"HopeBridge" <${t.user}>`,
-    bcc: to,
-    subject,
-    text: text.replace(/\n/g, '\n'),
-    html: htmlWrap(`<p>${text.replace(/\n/g, '<br>')}</p>`),
-  });
+// ── Mass mail ────────────────────────────────────
+// Resend doesn't support BCC bulk sending on free tier.
+// This sends individually to each recipient.
+async function sendMassEmail({ to, subject, text }) {
+  if (!to || to.length === 0) throw new Error('No recipients provided')
+  const html = htmlWrap(`<p>${text.replace(/\n/g, '<br>')}</p>`)
+  for (const recipient of to) {
+    await send({ to: recipient, subject, html })
+  }
 }
 
-// ── Exports ──────────────────────────────────────────────────────
+// ── Exports ──────────────────────────────────────
 module.exports = {
   sendWelcomeEmail,
   sendDonationConfirmation,
   sendCampaignStatusEmail,
   sendNewCampaignAdminAlert,
   sendVerificationEmail,
-  sendMassEmail,
   sendNewDonationAdminAlert,
-
-  // Wallet alerts
   sendNewDepositRequestAlert,
   sendDepositStatusEmail,
   sendWithdrawalRequestAlert,
   sendWithdrawalStatusEmail,
+  sendMassEmail,
 }
