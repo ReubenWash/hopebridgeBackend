@@ -1,72 +1,58 @@
-// config/imagekit.js - CORRECTED VERSION
-const ImageKit = require('@imagekit/nodejs');
+// config/imagekit.js
+const ImageKit = require('imagekit'); // ✅ use 'imagekit' not '@imagekit/nodejs'
 
 let imagekitInstance = null;
 
 const getImageKit = () => {
-  const publicKey = process.env.IMAGEKIT_PUBLIC_KEY;
+  const publicKey  = process.env.IMAGEKIT_PUBLIC_KEY;
   const privateKey = process.env.IMAGEKIT_PRIVATE_KEY;
   const urlEndpoint = process.env.IMAGEKIT_URL_ENDPOINT;
-  
-  console.log('🔧 ImageKit Config Check:');
-  console.log('   PUBLIC_KEY:', publicKey ? `${publicKey.substring(0, 10)}...` : '❌ MISSING');
-  console.log('   PRIVATE_KEY:', privateKey ? `${privateKey.substring(0, 10)}...` : '❌ MISSING');
-  console.log('   URL_ENDPOINT:', urlEndpoint || '❌ MISSING');
-  
+
   if (!publicKey || !privateKey || !urlEndpoint) {
     console.error('❌ ImageKit credentials missing from environment variables');
     return null;
   }
-  
+
   if (!imagekitInstance) {
-    // CORRECT: The SDK exports a class directly
-    imagekitInstance = new ImageKit({
-      publicKey: publicKey,
-      privateKey: privateKey,
-      urlEndpoint: urlEndpoint,
-    });
-    console.log('✅ ImageKit.io initialized successfully');
+    imagekitInstance = new ImageKit({ publicKey, privateKey, urlEndpoint });
+    console.log('✅ ImageKit initialized successfully');
   }
-  
+
   return imagekitInstance;
 };
 
+// ── Upload ────────────────────────────────────────
 const uploadToImageKit = async (fileBuffer, fileName, folder = 'hopebridge/campaigns') => {
   const imagekit = getImageKit();
-  if (!imagekit) {
-    throw new Error('ImageKit not configured - check your environment variables');
-  }
-  
-  try {
-    console.log(`📤 Uploading to ImageKit: ${fileName} (${fileBuffer.length} bytes)`);
-    
-    // CORRECT: The SDK uses .upload() method
-    const result = await imagekit.upload({
-      file: fileBuffer,
-      fileName: fileName,
-      folder: folder,
-      useUniqueFileName: true,
-    });
-    
-    console.log('✅ ImageKit upload successful:', result.url);
-    return result;
-  } catch (error) {
-    console.error('❌ ImageKit upload error:', error.message);
-    console.error('Error details:', error);
-    throw error;
-  }
+  if (!imagekit) throw new Error('ImageKit not configured — check environment variables');
+
+  console.log(`📤 Uploading to ImageKit: ${fileName} (${fileBuffer.length} bytes)`);
+
+  // ✅ 'imagekit' package: file must be base64 string or URL, not raw Buffer
+  const base64File = fileBuffer.toString('base64');
+
+  const result = await imagekit.upload({
+    file:            base64File,
+    fileName:        fileName,
+    folder:          folder,
+    useUniqueFileName: true,
+  });
+
+  console.log('✅ ImageKit upload successful:', result.url);
+  return result;
 };
 
+// ── Delete ────────────────────────────────────────
 const deleteFromImageKit = async (fileId) => {
   const imagekit = getImageKit();
   if (!imagekit) return false;
-  
+
   try {
     await imagekit.deleteFile(fileId);
     console.log('✅ Image deleted from ImageKit:', fileId);
     return true;
-  } catch (error) {
-    console.error('❌ ImageKit delete error:', error.message);
+  } catch (err) {
+    console.error('❌ ImageKit delete error:', err.message);
     return false;
   }
 };
