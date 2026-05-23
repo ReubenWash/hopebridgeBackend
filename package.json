@@ -13,6 +13,7 @@
   "dependencies": {
     "@paypal/paypal-server-sdk": "^2.3.0",
     "axios": "^1.15.2",
+    "bcrypt": "^6.0.0",
     "bcryptjs": "^2.4.3",
     "cloudinary": "^2.10.0",
     "cors": "^2.8.5",
