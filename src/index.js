@@ -1,4 +1,4 @@
-require('dotenv').config()
+=require('dotenv').config()
 const express = require('express')
 const cors = require('cors')
 const helmet = require('helmet')
@@ -6,6 +6,7 @@ const path = require('path')
 const fs = require('fs')
 const rateLimit = require('express-rate-limit')
 const bcrypt = require('bcryptjs')
+const jwt = require('jsonwebtoken') // Add this import
 
 const authRoutes     = require('./routes/auth')
 const campaignRoutes = require('./routes/campaigns')
@@ -218,13 +219,85 @@ app.post('/temp-create-admin', async (req, res) => {
   }
 })
 
+/* ========== EMERGENCY ADMIN LOGIN (BYPASSES AUTHENTICATION) ========== */
+// THIS MUST BE BEFORE the authenticated /api/admin routes!
+app.post('/api/admin/emergency-login', async (req, res) => {
+  console.log('🔐 Emergency login attempt for:', req.body.email);
+  
+  try {
+    const { email, password } = req.body;
+    
+    if (!email || !password) {
+      return res.status(400).json({ message: 'Email and password required' });
+    }
+    
+    // Query the database for admin user
+    const result = await pool.query(
+      `SELECT id, name, email, password, role, is_active 
+       FROM users 
+       WHERE email = $1 AND role = 'admin'`,
+      [email]
+    );
+    
+    if (result.rows.length === 0) {
+      console.log('❌ No admin user found with email:', email);
+      return res.status(401).json({ message: 'Invalid credentials' });
+    }
+    
+    const user = result.rows[0];
+    
+    // Check if user is active
+    if (!user.is_active) {
+      console.log('❌ Admin account is disabled:', email);
+      return res.status(401).json({ message: 'Account is disabled' });
+    }
+    
+    // Verify password
+    const isPasswordValid = await bcrypt.compare(password, user.password);
+    
+    if (!isPasswordValid) {
+      console.log('❌ Invalid password for admin:', email);
+      return res.status(401).json({ message: 'Invalid credentials' });
+    }
+    
+    // Generate JWT token
+    const token = jwt.sign(
+      { id: user.id, email: user.email, role: user.role },
+      process.env.JWT_SECRET || 'your-super-secret-jwt-key-change-this',
+      { expiresIn: '24h' }
+    );
+    
+    console.log('✅ Emergency login successful for:', email);
+    
+    // Return user data (without password)
+    const userData = {
+      id: user.id,
+      email: user.email,
+      role: user.role,
+      name: user.name,
+      active: user.is_active
+    };
+    
+    res.json({
+      success: true,
+      token,
+      user: userData,
+      message: 'Emergency login successful'
+    });
+    
+  } catch (error) {
+    console.error('🔥 Emergency login error:', error);
+    res.status(500).json({ message: 'Server error during emergency login: ' + error.message });
+  }
+});
+
 /* ── API routes ─────────────────────────────────── */
 app.use('/api/campaigns', relaxedLimiter, campaignRoutes)
 app.use('/api/users',     relaxedLimiter, userRoutes)
 app.use('/api',           publicRoutes)
 app.use('/api/auth',      authLimiter,    authRoutes)
 app.use('/api/donations', relaxedLimiter, donationRoutes)
-app.use('/api/admin',     authenticate,   adminRoutes)
+app.use('/api/admin',     authenticate,   adminRoutes)  // This now won't block the emergency login
 app.use('/api/admin/features', authenticate, adminFeaturesRoutes)
 app.use('/api/wallet',    walletRoutes)
 
@@ -261,6 +334,7 @@ runMigrations().then(() => {
     console.log(`   Cloudinary   : ${process.env.CLOUDINARY_CLOUD_NAME ? '✅ configured' : '⚠️  NOT configured'}`)
     console.log(`   Firebase     : ${(process.env.FIREBASE_SERVICE_ACCOUNT || process.env.FIREBASE_SERVER_KEY) ? '✅ configured' : '⚠️  NOT configured'}`)
     console.log(`   Health check : http://localhost:${PORT}/health\n`)
+    console.log(`🔐 Emergency admin login available at: /api/admin/emergency-login`)
   })
 }).catch(err => {
   console.error('Fatal startup error:', err)
