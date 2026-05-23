@@ -8,6 +8,22 @@ const migrate = async (closePool = true) => {
   try {
     console.log('🔄 Running migrations...')
 
+    // Check if we need to run migrations
+    const tableCheck = await client.query(`
+      SELECT EXISTS (
+        SELECT 1 FROM information_schema.tables 
+        WHERE table_name = 'users'
+      )
+    `)
+    
+    const tablesExist = tableCheck.rows[0].exists
+    
+    if (tablesExist) {
+      console.log('📊 Tables already exist, checking for updates...')
+    } else {
+      console.log('📊 Creating new tables...')
+    }
+
     await client.query(`
       -- USERS
       CREATE TABLE IF NOT EXISTS users (
@@ -109,7 +125,7 @@ const migrate = async (closePool = true) => {
       CREATE TABLE IF NOT EXISTS wallet_transactions (
         id SERIAL PRIMARY KEY,
         user_id INTEGER REFERENCES users(id) ON DELETE CASCADE,
-        amount NUMERIC(12,2) NOT NULL,
+        amount NUMERIC(12,2) NOT NULL CHECK (amount != 0),
         type VARCHAR(30) NOT NULL,
         reference VARCHAR(255),
         reference_id INTEGER,
@@ -402,7 +418,7 @@ const migrate = async (closePool = true) => {
       ALTER TABLE audit_logs ADD COLUMN IF NOT EXISTS user_agent TEXT;
     `)
 
-    // Create indexes for better performance
+    // Create indexes for better performance (only if they don't exist)
     await client.query(`
       CREATE INDEX IF NOT EXISTS idx_pending_users_email ON pending_users(email);
       CREATE INDEX IF NOT EXISTS idx_pending_users_code ON pending_users(verification_code);
@@ -445,7 +461,7 @@ const migrate = async (closePool = true) => {
       ALTER TABLE escrow_holds ADD COLUMN IF NOT EXISTS donor_id INTEGER REFERENCES users(id) ON DELETE CASCADE;
     `)
 
-    // ✅ Insert default settings
+    // ✅ Insert default settings (only if they don't exist)
     await client.query(`
       INSERT INTO settings (key, value) VALUES 
         ('cloudinary_cloud_name', ''),
@@ -470,36 +486,38 @@ const migrate = async (closePool = true) => {
       ON CONFLICT (key) DO NOTHING;
     `)
 
-    // ✅ Insert default email templates
+    // ✅ Insert default email templates (only if they don't exist)
     await client.query(`
       INSERT INTO email_templates (template_key, subject, body_text, variables) VALUES 
         ('verification', 'Your HopeBridge Verification Code', 
-         'Hi {{name}},\n\nThank you for registering. Your verification code is:\n\n{{code}}\n\nThis code expires in 15 minutes.\n\nIf you didn''t request this, please ignore this email.', 
+         'Hi {{name}},\\n\\nThank you for registering. Your verification code is:\\n\\n{{code}}\\n\\nThis code expires in 15 minutes.\\n\\nIf you didn''t request this, please ignore this email.', 
          '["name","code"]'),
         ('welcome', 'Welcome to HopeBridge, {{name}}!', 
-         'Hi {{name}},\n\nWelcome to HopeBridge! You joined as a {{role}}.\n\nStart making an impact today.\n\nBest regards,\nThe HopeBridge Team', 
+         'Hi {{name}},\\n\\nWelcome to HopeBridge! You joined as a {{role}}.\\n\\nStart making an impact today.\\n\\nBest regards,\\nThe HopeBridge Team', 
          '["name","role"]'),
         ('donation_confirmation', 'Thank you for your donation of ${{amount}}!', 
-         'Dear {{donor_name}},\n\nThank you for your generous donation of ${{amount}} to {{campaign_title}}.\n\nYour support makes a real difference!\n\nDonation Details:\n- Amount: ${{amount}}\n- Campaign: {{campaign_title}}\n- Date: {{date}}\n\nWith gratitude,\nThe HopeBridge Team', 
+         'Dear {{donor_name}},\\n\\nThank you for your generous donation of ${{amount}} to {{campaign_title}}.\\n\\nYour support makes a real difference!\\n\\nDonation Details:\\n- Amount: ${{amount}}\\n- Campaign: {{campaign_title}}\\n- Date: {{date}}\\n\\nWith gratitude,\\nThe HopeBridge Team', 
          '["donor_name","amount","campaign_title","date"]'),
         ('campaign_approved', 'Your campaign "{{title}}" has been approved!', 
-         'Dear {{creator_name}},\n\nGreat news! Your campaign "{{title}}" has been approved and is now live.\n\nShare it with your network to start raising funds.\n\nCampaign Link: {{campaign_link}}\n\nBest of luck!\nThe HopeBridge Team', 
+         'Dear {{creator_name}},\\n\\nGreat news! Your campaign "{{title}}" has been approved and is now live.\\n\\nShare it with your network to start raising funds.\\n\\nCampaign Link: {{campaign_link}}\\n\\nBest of luck!\\nThe HopeBridge Team', 
          '["creator_name","title","campaign_link"]'),
         ('campaign_rejected', 'Update on your campaign "{{title}}"', 
-         'Dear {{creator_name}},\n\nAfter careful review, your campaign "{{title}}" was not approved.\n\nReason: {{reason}}\n\nPlease review our guidelines and feel free to resubmit.\n\nThe HopeBridge Team', 
+         'Dear {{creator_name}},\\n\\nAfter careful review, your campaign "{{title}}" was not approved.\\n\\nReason: {{reason}}\\n\\nPlease review our guidelines and feel free to resubmit.\\n\\nThe HopeBridge Team', 
          '["creator_name","title","reason"]'),
         ('withdrawal_status', 'Your withdrawal of ${{amount}} has been {{status}}', 
-         'Dear {{name}},\n\nYour withdrawal request of ${{amount}} has been {{status}}.\n\n{{admin_note}}\n\nIf you have any questions, please contact support.\n\nThe HopeBridge Team', 
+         'Dear {{name}},\\n\\nYour withdrawal request of ${{amount}} has been {{status}}.\\n\\n{{admin_note}}\\n\\nIf you have any questions, please contact support.\\n\\nThe HopeBridge Team', 
          '["name","amount","status","admin_note"]')
       ON CONFLICT (template_key) DO NOTHING;
     `)
 
-    // ✅ Insert default platform fees
-    await client.query(`
-      INSERT INTO platform_fees (percentage, fixed_amount, min_fee, max_fee, withdrawal_fee, minimum_withdrawal)
-      VALUES (0, 0, 0, NULL, 0, 10)
-      ON CONFLICT DO NOTHING;
-    `)
+    // ✅ Insert default platform fees (only if table is empty)
+    const feeCheck = await client.query(`SELECT COUNT(*) FROM platform_fees`)
+    if (parseInt(feeCheck.rows[0].count) === 0) {
+      await client.query(`
+        INSERT INTO platform_fees (percentage, fixed_amount, min_fee, max_fee, withdrawal_fee, minimum_withdrawal)
+        VALUES (0, 0, 0, NULL, 0, 10)
+      `)
+    }
 
     // ✅ Remove old PayPal/Firebase settings if they exist (cleanup)
     await client.query(`
@@ -548,29 +566,38 @@ const migrate = async (closePool = true) => {
       DELETE FROM pending_users WHERE created_at < NOW() - INTERVAL '24 hours'
     `)
 
-    // Seed admin
-    const adminHash = await bcrypt.hash('admin123', 10)
-    await client.query(`
-      INSERT INTO users (name, email, password, role, is_active, is_verified)
-      VALUES ('Admin User', 'admin@hopebridge.com', $1, 'admin', true, true)
-      ON CONFLICT (email) DO NOTHING
-    `, [adminHash])
+    // Check if admin exists before seeding
+    const adminCheck = await client.query(`SELECT id FROM users WHERE email = 'admin@hopebridge.com'`)
+    if (adminCheck.rows.length === 0) {
+      const adminHash = await bcrypt.hash('admin123', 10)
+      await client.query(`
+        INSERT INTO users (name, email, password, role, is_active, is_verified)
+        VALUES ('Admin User', 'admin@hopebridge.com', $1, 'admin', true, true)
+      `, [adminHash])
+      console.log('👑 Admin user created')
+    }
 
-    // Seed demo creator
-    const demoHash = await bcrypt.hash('demo123', 10)
-    await client.query(`
-      INSERT INTO users (name, email, password, role, is_active, is_verified)
-      VALUES ('Demo Creator', 'creator@demo.com', $1, 'creator', true, true)
-      ON CONFLICT (email) DO NOTHING
-    `, [demoHash])
+    // Check if demo creator exists
+    const creatorCheck = await client.query(`SELECT id FROM users WHERE email = 'creator@demo.com'`)
+    if (creatorCheck.rows.length === 0) {
+      const demoHash = await bcrypt.hash('demo123', 10)
+      await client.query(`
+        INSERT INTO users (name, email, password, role, is_active, is_verified)
+        VALUES ('Demo Creator', 'creator@demo.com', $1, 'creator', true, true)
+      `, [demoHash])
+      console.log('👤 Demo creator created')
+    }
 
-    // Seed demo donor
-    const donorHash = await bcrypt.hash('donor123', 10)
-    await client.query(`
-      INSERT INTO users (name, email, password, role, is_active, is_verified)
-      VALUES ('Demo Donor', 'donor@demo.com', $1, 'donor', true, true)
-      ON CONFLICT (email) DO NOTHING
-    `, [donorHash])
+    // Check if demo donor exists
+    const donorCheck = await client.query(`SELECT id FROM users WHERE email = 'donor@demo.com'`)
+    if (donorCheck.rows.length === 0) {
+      const donorHash = await bcrypt.hash('donor123', 10)
+      await client.query(`
+        INSERT INTO users (name, email, password, role, is_active, is_verified)
+        VALUES ('Demo Donor', 'donor@demo.com', $1, 'donor', true, true)
+      `, [donorHash])
+      console.log('👤 Demo donor created')
+    }
 
     // Ensure all users have wallets
     await client.query(`
