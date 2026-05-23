@@ -40,7 +40,7 @@ if (!fs.existsSync(uploadsDir)) {
   console.log('📁 Created uploads directory')
 }
 
-/* ── CORS Configuration (Updated for Vercel) ───────────────────────── */
+/* ── CORS Configuration ──────────────────────────── */
 const rawOrigins = process.env.CLIENT_URL || ''
 const allowedOrigins = [
   ...rawOrigins.split(',').map(o => o.trim()).filter(Boolean),
@@ -53,6 +53,11 @@ const allowedOrigins = [
   'http://localhost:5000',
 ]
 
+// Define apiDomain BEFORE using it
+const apiDomain = process.env.API_URL || 'https://cooing-rosanna-rub-3a11fd0e.koyeb.app'
+
+console.log('🌐 CORS allowed origins:', allowedOrigins)
+
 // Allow any Vercel preview deployment
 const isVercelPreview = (origin) => {
   return origin && (
@@ -61,8 +66,7 @@ const isVercelPreview = (origin) => {
   )
 }
 
-console.log('🌐 CORS allowed origins:', allowedOrigins)
-
+/* ── Helmet ─────────────────────────────────────── */
 app.use(helmet({
   contentSecurityPolicy: {
     directives: {
@@ -79,16 +83,13 @@ app.use(helmet({
 // Enhanced CORS middleware
 app.use(cors({
   origin: (origin, callback) => {
-    // Allow requests with no origin (like mobile apps or curl)
     if (!origin) return callback(null, true)
     
-    // Allow any Vercel preview deployment
     if (isVercelPreview(origin)) {
       console.log('✅ CORS allowed (Vercel preview):', origin)
       return callback(null, true)
     }
     
-    // Check against allowed origins list
     if (allowedOrigins.includes(origin)) {
       console.log('✅ CORS allowed:', origin)
       callback(null, true)
@@ -101,13 +102,12 @@ app.use(cors({
   methods: ['GET', 'POST', 'PUT', 'PATCH', 'DELETE', 'OPTIONS', 'HEAD'],
   allowedHeaders: ['Content-Type', 'Authorization', 'X-Requested-With', 'Accept', 'Origin'],
   exposedHeaders: ['Content-Range', 'X-Content-Range'],
-  maxAge: 86400, // 24 hours
+  maxAge: 86400,
 }))
 
-// Pre-flight requests
 app.options('*', cors())
 
-/* ── Static uploads with CORS headers ─────────────────────────────── */
+/* ── Static uploads ─────────────────────────────── */
 app.use('/uploads', (req, res, next) => {
   const origin = req.headers.origin
   if (origin && (allowedOrigins.includes(origin) || isVercelPreview(origin))) {
@@ -127,10 +127,7 @@ const mkLimiter = (max, windowMs = 15 * 60 * 1000, message = 'Too many requests.
     standardHeaders: true,
     legacyHeaders: false,
     skip: () => isDev,
-    keyGenerator: (req) => {
-      // Use IP address for rate limiting behind proxy
-      return req.ip || req.connection.remoteAddress
-    },
+    keyGenerator: (req) => req.ip || req.connection.remoteAddress,
   })
 
 const relaxedLimiter = mkLimiter(500)
@@ -162,7 +159,6 @@ app.get('/debug-cors', (req, res) => {
     allowedOrigins: allowedOrigins,
     clientUrl: process.env.CLIENT_URL,
     requestOrigin: req.headers.origin,
-    requestHost: req.headers.host,
     vercelPreview: isVercelPreview(req.headers.origin),
   })
 })
@@ -241,7 +237,7 @@ app.use((req, res) => {
   })
 })
 
-/* ── Global error handler ──────────────────────────────── */
+/* ── Global error handler ───────────────────────── */
 app.use(errorHandler)
 
 /* ── Migrations + start ─────────────────────────── */
