@@ -26,6 +26,18 @@ const migrate = async (closePool = true) => {
         updated_at TIMESTAMPTZ DEFAULT NOW()
       );
 
+      -- PENDING USERS (for email verification before account creation)
+      CREATE TABLE IF NOT EXISTS pending_users (
+        id SERIAL PRIMARY KEY,
+        email VARCHAR(150) UNIQUE NOT NULL,
+        name VARCHAR(100) NOT NULL,
+        password_hash VARCHAR(255) NOT NULL,
+        role VARCHAR(20) NOT NULL DEFAULT 'donor',
+        verification_code VARCHAR(10) NOT NULL,
+        verification_expires TIMESTAMPTZ NOT NULL,
+        created_at TIMESTAMPTZ DEFAULT NOW()
+      );
+
       -- CAMPAIGNS
       CREATE TABLE IF NOT EXISTS campaigns (
         id SERIAL PRIMARY KEY,
@@ -46,7 +58,7 @@ const migrate = async (closePool = true) => {
         completed_at TIMESTAMPTZ
       );
 
-      -- CAMPAIGN UPDATES (for campaign profile updates/announcements)
+      -- CAMPAIGN UPDATES
       CREATE TABLE IF NOT EXISTS campaign_updates (
         id SERIAL PRIMARY KEY,
         campaign_id INTEGER REFERENCES campaigns(id) ON DELETE CASCADE,
@@ -70,6 +82,8 @@ const migrate = async (closePool = true) => {
         payment_reference VARCHAR(255) UNIQUE,
         escrow_status VARCHAR(20) DEFAULT 'held'
           CHECK (escrow_status IN ('held','released','refunded')),
+        platform_fee NUMERIC(10,2) DEFAULT 0,
+        net_amount NUMERIC(10,2) DEFAULT 0,
         created_at TIMESTAMPTZ DEFAULT NOW()
       );
 
@@ -79,6 +93,7 @@ const migrate = async (closePool = true) => {
         account_name TEXT,
         account_number TEXT,
         bank_name TEXT,
+        bank_sort_code VARCHAR(20),
         paypal_email TEXT
       );
 
@@ -130,6 +145,7 @@ const migrate = async (closePool = true) => {
         status VARCHAR(20) DEFAULT 'pending'
           CHECK (status IN ('pending','approved','rejected','paid')),
         admin_note TEXT,
+        transaction_id VARCHAR(100),
         created_at TIMESTAMPTZ DEFAULT NOW(),
         processed_at TIMESTAMPTZ
       );
@@ -164,10 +180,12 @@ const migrate = async (closePool = true) => {
         reported_by INTEGER REFERENCES users(id) ON DELETE SET NULL,
         status VARCHAR(20) DEFAULT 'open'
           CHECK (status IN ('open','investigating','resolved')),
+        resolution TEXT,
+        resolved_at TIMESTAMPTZ,
         created_at TIMESTAMPTZ DEFAULT NOW()
       );
 
-      -- FIREBASE NOTIFICATIONS (for storing admin FCM tokens)
+      -- FIREBASE NOTIFICATIONS (admin FCM tokens)
       CREATE TABLE IF NOT EXISTS admin_fcm_tokens (
         id SERIAL PRIMARY KEY,
         admin_id INTEGER REFERENCES users(id) ON DELETE CASCADE,
@@ -176,6 +194,114 @@ const migrate = async (closePool = true) => {
         updated_at TIMESTAMPTZ DEFAULT NOW(),
         UNIQUE(admin_id, token)
       );
+
+      -- ============ NEW TABLES FOR ENHANCED FEATURES ============
+
+      -- PLATFORM FEES
+      CREATE TABLE IF NOT EXISTS platform_fees (
+        id SERIAL PRIMARY KEY,
+        percentage NUMERIC(5,2) DEFAULT 0 CHECK (percentage >= 0 AND percentage <= 100),
+        fixed_amount NUMERIC(10,2) DEFAULT 0,
+        min_fee NUMERIC(10,2) DEFAULT 0,
+        max_fee NUMERIC(10,2),
+        withdrawal_fee NUMERIC(10,2) DEFAULT 0,
+        minimum_withdrawal NUMERIC(10,2) DEFAULT 10,
+        updated_at TIMESTAMPTZ DEFAULT NOW(),
+        updated_by INTEGER REFERENCES users(id)
+      );
+
+      -- AUDIT LOGS
+      CREATE TABLE IF NOT EXISTS audit_logs (
+        id SERIAL PRIMARY KEY,
+        admin_id INTEGER REFERENCES users(id),
+        action VARCHAR(100) NOT NULL,
+        entity_type VARCHAR(50),
+        entity_id INTEGER,
+        details JSONB,
+        ip_address INET,
+        user_agent TEXT,
+        created_at TIMESTAMPTZ DEFAULT NOW()
+      );
+
+      -- CREATOR VERIFICATIONS
+      CREATE TABLE IF NOT EXISTS creator_verifications (
+        id SERIAL PRIMARY KEY,
+        user_id INTEGER REFERENCES users(id) ON DELETE CASCADE,
+        status VARCHAR(20) DEFAULT 'pending' CHECK (status IN ('pending','approved','rejected','needs_review')),
+        id_document_url TEXT,
+        id_document_type VARCHAR(50),
+        id_document_number VARCHAR(100),
+        proof_of_address_url TEXT,
+        business_registration_url TEXT,
+        business_name VARCHAR(200),
+        business_tax_id VARCHAR(100),
+        bank_account_name VARCHAR(100),
+        bank_account_number VARCHAR(50),
+        bank_name VARCHAR(100),
+        bank_sort_code VARCHAR(20),
+        notes TEXT,
+        reviewed_by INTEGER REFERENCES users(id),
+        reviewed_at TIMESTAMPTZ,
+        created_at TIMESTAMPTZ DEFAULT NOW(),
+        updated_at TIMESTAMPTZ DEFAULT NOW()
+      );
+
+      -- DONOR SUBSCRIPTIONS (Recurring Donations)
+      CREATE TABLE IF NOT EXISTS donor_subscriptions (
+        id SERIAL PRIMARY KEY,
+        donor_id INTEGER REFERENCES users(id) ON DELETE CASCADE,
+        campaign_id INTEGER REFERENCES campaigns(id) ON DELETE SET NULL,
+        amount NUMERIC(10,2) NOT NULL CHECK (amount > 0),
+        frequency VARCHAR(20) DEFAULT 'monthly' CHECK (frequency IN ('weekly','monthly','yearly')),
+        status VARCHAR(20) DEFAULT 'active' CHECK (status IN ('active','paused','cancelled','expired','failed')),
+        next_billing_date DATE,
+        last_billing_date DATE,
+        total_donated NUMERIC(12,2) DEFAULT 0,
+        payment_method VARCHAR(50) DEFAULT 'wallet',
+        created_at TIMESTAMPTZ DEFAULT NOW(),
+        cancelled_at TIMESTAMPTZ,
+        updated_at TIMESTAMPTZ DEFAULT NOW()
+      );
+
+      -- PUSH NOTIFICATION LOGS
+      CREATE TABLE IF NOT EXISTS push_notifications (
+        id SERIAL PRIMARY KEY,
+        title VARCHAR(200) NOT NULL,
+        body TEXT,
+        target_type VARCHAR(20) CHECK (target_type IN ('all','donors','creators','admin','specific_user')),
+        target_user_id INTEGER REFERENCES users(id),
+        sent_count INTEGER DEFAULT 0,
+        delivered_count INTEGER DEFAULT 0,
+        clicked_count INTEGER DEFAULT 0,
+        failed_count INTEGER DEFAULT 0,
+        sent_at TIMESTAMPTZ DEFAULT NOW()
+      );
+
+      -- EMAIL TEMPLATES (Customizable)
+      CREATE TABLE IF NOT EXISTS email_templates (
+        id SERIAL PRIMARY KEY,
+        template_key VARCHAR(100) UNIQUE NOT NULL,
+        subject TEXT NOT NULL,
+        body_html TEXT,
+        body_text TEXT,
+        variables JSONB,
+        updated_at TIMESTAMPTZ DEFAULT NOW()
+      );
+
+      -- TOP DONORS VIEW (Helper)
+      CREATE OR REPLACE VIEW top_donors_view AS
+      SELECT 
+        u.id,
+        u.name,
+        u.email,
+        COALESCE(SUM(d.amount), 0) as total_donated,
+        COUNT(d.id) as donation_count,
+        MAX(d.created_at) as last_donation_date
+      FROM users u
+      LEFT JOIN donations d ON d.donor_id = u.id AND d.escrow_status = 'released'
+      WHERE u.role = 'donor'
+      GROUP BY u.id
+      ORDER BY total_donated DESC;
 
       -- AUTO UPDATE FUNCTION
       CREATE OR REPLACE FUNCTION update_updated_at()
@@ -218,6 +344,30 @@ const migrate = async (closePool = true) => {
           FOR EACH ROW EXECUTE FUNCTION update_updated_at();
         END IF;
       END $$;
+
+      DO $$ BEGIN
+        IF NOT EXISTS (SELECT 1 FROM pg_trigger WHERE tgname = 'creator_verifications_updated') THEN
+          CREATE TRIGGER creator_verifications_updated
+          BEFORE UPDATE ON creator_verifications
+          FOR EACH ROW EXECUTE FUNCTION update_updated_at();
+        END IF;
+      END $$;
+
+      DO $$ BEGIN
+        IF NOT EXISTS (SELECT 1 FROM pg_trigger WHERE tgname = 'donor_subscriptions_updated') THEN
+          CREATE TRIGGER donor_subscriptions_updated
+          BEFORE UPDATE ON donor_subscriptions
+          FOR EACH ROW EXECUTE FUNCTION update_updated_at();
+        END IF;
+      END $$;
+
+      DO $$ BEGIN
+        IF NOT EXISTS (SELECT 1 FROM pg_trigger WHERE tgname = 'platform_fees_updated') THEN
+          CREATE TRIGGER platform_fees_updated
+          BEFORE UPDATE ON platform_fees
+          FOR EACH ROW EXECUTE FUNCTION update_updated_at();
+        END IF;
+      END $$;
     `)
 
     // Add missing columns if they don't exist (safe ALTER TABLE)
@@ -227,12 +377,16 @@ const migrate = async (closePool = true) => {
       ALTER TABLE donations ADD COLUMN IF NOT EXISTS donor_id INTEGER REFERENCES users(id) ON DELETE SET NULL;
       ALTER TABLE donations ADD COLUMN IF NOT EXISTS payment_reference VARCHAR(255);
       ALTER TABLE donations ADD COLUMN IF NOT EXISTS escrow_status VARCHAR(20) DEFAULT 'held';
+      ALTER TABLE donations ADD COLUMN IF NOT EXISTS platform_fee NUMERIC(10,2) DEFAULT 0;
+      ALTER TABLE donations ADD COLUMN IF NOT EXISTS net_amount NUMERIC(10,2) DEFAULT 0;
       ALTER TABLE creator_payment_methods ADD COLUMN IF NOT EXISTS paypal_email TEXT;
+      ALTER TABLE creator_payment_methods ADD COLUMN IF NOT EXISTS bank_sort_code VARCHAR(20);
       ALTER TABLE wallet_transactions ADD COLUMN IF NOT EXISTS reference_id INTEGER;
       ALTER TABLE wallet_transactions ADD COLUMN IF NOT EXISTS reference VARCHAR(255);
       ALTER TABLE wallet_transactions ADD COLUMN IF NOT EXISTS description TEXT;
       ALTER TABLE deposit_requests ADD COLUMN IF NOT EXISTS processed_at TIMESTAMPTZ;
       ALTER TABLE withdrawal_requests ADD COLUMN IF NOT EXISTS processed_at TIMESTAMPTZ;
+      ALTER TABLE withdrawal_requests ADD COLUMN IF NOT EXISTS transaction_id VARCHAR(100);
       ALTER TABLE escrow_holds ADD COLUMN IF NOT EXISTS held_at TIMESTAMPTZ DEFAULT NOW();
       ALTER TABLE escrow_holds ADD COLUMN IF NOT EXISTS released_at TIMESTAMPTZ;
       ALTER TABLE escrow_holds ADD COLUMN IF NOT EXISTS created_at TIMESTAMPTZ DEFAULT NOW();
@@ -240,16 +394,42 @@ const migrate = async (closePool = true) => {
       ALTER TABLE campaigns ADD COLUMN IF NOT EXISTS completion_requested_at TIMESTAMPTZ;
       ALTER TABLE campaigns ADD COLUMN IF NOT EXISTS completed_at TIMESTAMPTZ;
       ALTER TABLE campaigns ADD COLUMN IF NOT EXISTS image_file_id VARCHAR(255);
+      ALTER TABLE disputes ADD COLUMN IF NOT EXISTS resolution TEXT;
+      ALTER TABLE disputes ADD COLUMN IF NOT EXISTS resolved_at TIMESTAMPTZ;
+      ALTER TABLE creator_verifications ADD COLUMN IF NOT EXISTS id_document_number VARCHAR(100);
+      ALTER TABLE creator_verifications ADD COLUMN IF NOT EXISTS business_name VARCHAR(200);
+      ALTER TABLE creator_verifications ADD COLUMN IF NOT EXISTS business_tax_id VARCHAR(100);
+      ALTER TABLE audit_logs ADD COLUMN IF NOT EXISTS user_agent TEXT;
     `)
 
-    // ✅ FORCE FIX: Add the correct type constraint to wallet_transactions
+    // Create indexes for better performance
+    await client.query(`
+      CREATE INDEX IF NOT EXISTS idx_pending_users_email ON pending_users(email);
+      CREATE INDEX IF NOT EXISTS idx_pending_users_code ON pending_users(verification_code);
+      CREATE INDEX IF NOT EXISTS idx_audit_logs_admin_id ON audit_logs(admin_id);
+      CREATE INDEX IF NOT EXISTS idx_audit_logs_created_at ON audit_logs(created_at);
+      CREATE INDEX IF NOT EXISTS idx_audit_logs_action ON audit_logs(action);
+      CREATE INDEX IF NOT EXISTS idx_creator_verifications_user_id ON creator_verifications(user_id);
+      CREATE INDEX IF NOT EXISTS idx_creator_verifications_status ON creator_verifications(status);
+      CREATE INDEX IF NOT EXISTS idx_donor_subscriptions_donor_id ON donor_subscriptions(donor_id);
+      CREATE INDEX IF NOT EXISTS idx_donor_subscriptions_status ON donor_subscriptions(status);
+      CREATE INDEX IF NOT EXISTS idx_donor_subscriptions_next_billing ON donor_subscriptions(next_billing_date);
+      CREATE INDEX IF NOT EXISTS idx_push_notifications_sent_at ON push_notifications(sent_at);
+      CREATE INDEX IF NOT EXISTS idx_withdrawal_requests_user_id ON withdrawal_requests(user_id);
+      CREATE INDEX IF NOT EXISTS idx_withdrawal_requests_status ON withdrawal_requests(status);
+      CREATE INDEX IF NOT EXISTS idx_donations_donor_id ON donations(donor_id);
+      CREATE INDEX IF NOT EXISTS idx_donations_campaign_id ON donations(campaign_id);
+      CREATE INDEX IF NOT EXISTS idx_donations_created_at ON donations(created_at);
+    `)
+
+    // ✅ Add the correct type constraint to wallet_transactions
     await client.query(`
       ALTER TABLE wallet_transactions DROP CONSTRAINT IF EXISTS wallet_transactions_type_check;
       ALTER TABLE wallet_transactions ADD CONSTRAINT wallet_transactions_type_check 
-      CHECK (type IN ('deposit', 'donation_out', 'refund_in', 'withdrawal_out', 'escrow_hold', 'escrow_release', 'escrow_refund'));
+      CHECK (type IN ('deposit', 'donation_out', 'refund_in', 'withdrawal_out', 'escrow_hold', 'escrow_release', 'escrow_refund', 'fee_deduction'));
     `)
 
-    // ✅ FORCE FIX: Rename user_id to donor_id in escrow_holds if it exists
+    // ✅ Rename user_id to donor_id in escrow_holds if it exists
     await client.query(`
       DO $$ 
       BEGIN
@@ -260,12 +440,12 @@ const migrate = async (closePool = true) => {
       END $$;
     `)
 
-    // ✅ FORCE FIX: Ensure donor_id column exists (add if missing)
+    // ✅ Ensure donor_id column exists
     await client.query(`
       ALTER TABLE escrow_holds ADD COLUMN IF NOT EXISTS donor_id INTEGER REFERENCES users(id) ON DELETE CASCADE;
     `)
 
-    // ✅ Insert default settings (including email_verification_enabled and firebase settings)
+    // ✅ Insert default settings
     await client.query(`
       INSERT INTO settings (key, value) VALUES 
         ('cloudinary_cloud_name', ''),
@@ -281,9 +461,44 @@ const migrate = async (closePool = true) => {
         ('recaptcha_site_key', ''),
         ('recaptcha_secret_key', ''),
         ('email_verification_enabled', 'true'),
+        ('push_notifications_enabled', 'true'),
         ('firebase_server_key', ''),
-        ('firebase_sender_id', '')
+        ('firebase_sender_id', ''),
+        ('maintenance_mode', 'false'),
+        ('maintenance_message', 'We are currently performing scheduled maintenance. Please check back soon!'),
+        ('recaptcha_enabled', 'false')
       ON CONFLICT (key) DO NOTHING;
+    `)
+
+    // ✅ Insert default email templates
+    await client.query(`
+      INSERT INTO email_templates (template_key, subject, body_text, variables) VALUES 
+        ('verification', 'Your HopeBridge Verification Code', 
+         'Hi {{name}},\n\nThank you for registering. Your verification code is:\n\n{{code}}\n\nThis code expires in 15 minutes.\n\nIf you didn''t request this, please ignore this email.', 
+         '["name","code"]'),
+        ('welcome', 'Welcome to HopeBridge, {{name}}!', 
+         'Hi {{name}},\n\nWelcome to HopeBridge! You joined as a {{role}}.\n\nStart making an impact today.\n\nBest regards,\nThe HopeBridge Team', 
+         '["name","role"]'),
+        ('donation_confirmation', 'Thank you for your donation of ${{amount}}!', 
+         'Dear {{donor_name}},\n\nThank you for your generous donation of ${{amount}} to {{campaign_title}}.\n\nYour support makes a real difference!\n\nDonation Details:\n- Amount: ${{amount}}\n- Campaign: {{campaign_title}}\n- Date: {{date}}\n\nWith gratitude,\nThe HopeBridge Team', 
+         '["donor_name","amount","campaign_title","date"]'),
+        ('campaign_approved', 'Your campaign "{{title}}" has been approved!', 
+         'Dear {{creator_name}},\n\nGreat news! Your campaign "{{title}}" has been approved and is now live.\n\nShare it with your network to start raising funds.\n\nCampaign Link: {{campaign_link}}\n\nBest of luck!\nThe HopeBridge Team', 
+         '["creator_name","title","campaign_link"]'),
+        ('campaign_rejected', 'Update on your campaign "{{title}}"', 
+         'Dear {{creator_name}},\n\nAfter careful review, your campaign "{{title}}" was not approved.\n\nReason: {{reason}}\n\nPlease review our guidelines and feel free to resubmit.\n\nThe HopeBridge Team', 
+         '["creator_name","title","reason"]'),
+        ('withdrawal_status', 'Your withdrawal of ${{amount}} has been {{status}}', 
+         'Dear {{name}},\n\nYour withdrawal request of ${{amount}} has been {{status}}.\n\n{{admin_note}}\n\nIf you have any questions, please contact support.\n\nThe HopeBridge Team', 
+         '["name","amount","status","admin_note"]')
+      ON CONFLICT (template_key) DO NOTHING;
+    `)
+
+    // ✅ Insert default platform fees
+    await client.query(`
+      INSERT INTO platform_fees (percentage, fixed_amount, min_fee, max_fee, withdrawal_fee, minimum_withdrawal)
+      VALUES (0, 0, 0, NULL, 0, 10)
+      ON CONFLICT DO NOTHING;
     `)
 
     // ✅ Remove old PayPal/Firebase settings if they exist (cleanup)
@@ -293,7 +508,7 @@ const migrate = async (closePool = true) => {
       );
     `)
 
-    // ✅ Update deposit_requests constraint to include all statuses
+    // ✅ Update deposit_requests constraint
     await client.query(`
       ALTER TABLE deposit_requests DROP CONSTRAINT IF EXISTS deposit_requests_status_check;
       ALTER TABLE deposit_requests ADD CONSTRAINT deposit_requests_status_check 
@@ -328,6 +543,11 @@ const migrate = async (closePool = true) => {
       WHERE id NOT IN (SELECT user_id FROM wallets)
     `)
 
+    // Clean up any stale pending users (older than 24 hours)
+    await client.query(`
+      DELETE FROM pending_users WHERE created_at < NOW() - INTERVAL '24 hours'
+    `)
+
     // Seed admin
     const adminHash = await bcrypt.hash('admin123', 10)
     await client.query(`
@@ -352,7 +572,7 @@ const migrate = async (closePool = true) => {
       ON CONFLICT (email) DO NOTHING
     `, [donorHash])
 
-    // Ensure all users have wallets (again, for new users)
+    // Ensure all users have wallets
     await client.query(`
       INSERT INTO wallets (user_id, balance)
       SELECT id, 0 FROM users
@@ -363,11 +583,19 @@ const migrate = async (closePool = true) => {
     console.log('📁 ImageKit.io storage configured')
     console.log('🔧 Email verification toggle added (default: enabled)')
     console.log('📱 Firebase push notification tables created')
+    console.log('👥 Pending users table added for verification flow')
+    console.log('💰 Platform fees table created')
+    console.log('📝 Audit logs table created')
+    console.log('✅ Creator verification table created')
+    console.log('🔄 Donor subscriptions table created')
+    console.log('📧 Email templates table created')
+    console.log('🔔 Push notification logs table created')
     console.log('🗑️ Removed PayPal settings')
     console.log('🔒 Added wallet_transactions type constraint')
     console.log('📊 Added campaign_updates table for profile updates')
     console.log('✅ Added completed status to campaigns')
     console.log('🖼️ Added image_file_id column for ImageKit.io integration')
+    console.log('🏆 Top donors view created')
 
   } catch (err) {
     console.error('❌ Migration failed:', err.message)

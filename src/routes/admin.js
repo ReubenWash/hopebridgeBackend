@@ -34,6 +34,28 @@ const {
   approveWithdrawal,
   rejectWithdrawal,
 } = require('../controllers/adminWalletController')
+const {
+  sendNotification,
+  getNotificationHistory,
+  getNotificationSettings,
+  updateNotificationSettings,
+  testNotification,
+} = require('../controllers/notificationController')
+const {
+  getPayoutHistory,
+  markAsPaid,
+  getPayoutSummary,
+  getFeeSettings,
+  updateFeeSettings,
+  calculateFee,
+  getCreatorVerifications,
+  reviewCreatorVerification,
+  getTopDonors,
+  getRecurringDonations,
+  updateSubscriptionStatus,
+  getDonorAnalytics,
+  getAuditLogs,
+} = require('../controllers/adminFeaturesController')
 
 // NOTE: authenticate runs once in server.js via app.use('/api/admin', authenticate, adminRoutes)
 // So we only need requireAdmin here for role checking
@@ -78,13 +100,20 @@ router.post('/mass-mail',             sendMassMail)
 router.get('/verification-setting',   getVerificationSetting)
 router.put('/verification-setting',   updateVerificationSetting)
 
-// ── Firebase Push Notifications ────────────────────────────────────
+// ── Firebase Push Notifications (Legacy Admin) ────────────────────
 router.post('/admin-fcm-token',       saveAdminFCMToken)
 router.get('/admin-fcm-tokens',       getAdminFCMTokens)
 router.delete('/admin-fcm-token',     removeAdminFCMToken)
 router.get('/firebase-settings',      getFirebaseSettings)
 router.put('/firebase-settings',      saveFirebaseSettings)
 router.post('/test-push',             sendTestPushNotification)
+
+// ── New Push Notification System ───────────────────────────────────
+router.post('/send-notification',     sendNotification)
+router.get('/notification-history',   getNotificationHistory)
+router.get('/notification-settings',  getNotificationSettings)
+router.put('/notification-settings',  updateNotificationSettings)
+router.post('/test-notification',     testNotification)
 
 // ── ImageKit.io Settings ───────────────────────────────────────────
 router.get('/imagekit-settings',      getImageKitSettings)
@@ -103,5 +132,30 @@ router.put('/withdrawal-requests/:id/reject',  rejectWithdrawal)
 router.get('/campaigns/completion-requests',   getCompletionRequests)
 router.post('/campaigns/:id/release-escrow',   adminReleaseCampaignEscrow)
 router.post('/campaigns/:id/refund-escrow',    adminRefundCampaignEscrow)
+
+// ============ NEW FEATURES ROUTES ============
+
+// ── Payout Reconciliation ──────────────────────────────────────────
+router.get('/payouts',                getPayoutHistory)
+router.get('/payouts/summary',        getPayoutSummary)
+router.put('/payouts/:id/mark-paid',  markAsPaid)
+
+// ── Transaction Fee Management ─────────────────────────────────────
+router.get('/fees',                   getFeeSettings)
+router.put('/fees',                   updateFeeSettings)
+router.post('/fees/calculate',        calculateFee)
+
+// ── Creator Verification ───────────────────────────────────────────
+router.get('/creator-verifications',  getCreatorVerifications)
+router.put('/creator-verifications/:id/review', reviewCreatorVerification)
+
+// ── Donor Management ───────────────────────────────────────────────
+router.get('/top-donors',             getTopDonors)
+router.get('/recurring-donations',    getRecurringDonations)
+router.put('/recurring-donations/:id/status', updateSubscriptionStatus)
+router.get('/donor-analytics',        getDonorAnalytics)
+
+// ── Audit Logs ─────────────────────────────────────────────────────
+router.get('/audit-logs',             getAuditLogs)
 
 module.exports = router

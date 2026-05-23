@@ -56,7 +56,7 @@ const checkSession = async (req, res, next) => {
   }
 };
 
-// POST /api/auth/register – ALL users need verification if enabled
+// POST /api/auth/register – Store pending registration, send code, DON'T create account yet
 const register = async (req, res, next) => {
   try {
     const { name, email, password, role = 'donor', recaptchaToken } = req.body;
@@ -69,63 +69,76 @@ const register = async (req, res, next) => {
       await verifyRecaptcha(recaptchaToken);
     }
 
-    // Check if user already exists
-    const exists = await pool.query('SELECT id FROM users WHERE email = $1', [email]);
-    if (exists.rows.length > 0) {
+    // Check if user already exists in main users table
+    const existingUser = await pool.query('SELECT id FROM users WHERE email = $1', [email]);
+    if (existingUser.rows.length > 0) {
       return res.status(409).json({ error: 'An account with that email already exists.' });
     }
-
-    const hash = await bcrypt.hash(password, 10);
 
     // Check if email verification is enabled in settings
     const verificationEnabled = await getSetting('email_verification_enabled');
     const needsVerification = verificationEnabled === 'true';
     
-    // If verification is disabled, auto-verify all users
-    const isVerified = !needsVerification;
-    const verificationCode = needsVerification ? Math.floor(100000 + Math.random() * 900000).toString() : null;
-    const verificationExpires = needsVerification ? new Date(Date.now() + 15 * 60 * 1000) : null;
+    // If verification is disabled, create account directly
+    if (!needsVerification) {
+      const hash = await bcrypt.hash(password, 10);
+      const result = await pool.query(
+        `INSERT INTO users (name, email, password, role, is_verified, created_at)
+         VALUES ($1, $2, $3, $4, true, NOW())
+         RETURNING id, name, email, role, is_verified`,
+        [name.trim(), email.toLowerCase().trim(), hash, userRole]
+      );
 
-    const result = await pool.query(
-      `INSERT INTO users (name, email, password, role, verification_code, verification_expires, is_verified)
-       VALUES ($1, $2, $3, $4, $5, $6, $7)
-       RETURNING id, name, email, role, is_verified, created_at`,
-      [name.trim(), email.toLowerCase().trim(), hash, userRole, verificationCode, verificationExpires, isVerified]
-    );
+      const user = result.rows[0];
+      await pool.query(
+        `INSERT INTO wallets (user_id, balance) VALUES ($1, 0) ON CONFLICT (user_id) DO NOTHING`,
+        [user.id]
+      );
 
-    const user = result.rows[0];
-
-    // Create wallet for new user
-    await pool.query(
-      `INSERT INTO wallets (user_id, balance) VALUES ($1, 0) ON CONFLICT (user_id) DO NOTHING`,
-      [user.id]
-    );
-
-    const token = signToken(user);
-
-    // Send verification email if verification is enabled
-    if (needsVerification && verificationCode) {
-      sendVerificationEmail({ to: user.email, name: user.name, code: verificationCode })
-        .catch(err => console.warn('Verification email failed:', err.message));
+      const token = signToken(user);
+      return res.status(201).json({
+        message: 'Account created! Welcome to HopeBridge.',
+        token,
+        needsVerification: false,
+        user: {
+          id: user.id,
+          name: user.name,
+          email: user.email,
+          role: user.role,
+          isVerified: user.is_verified,
+        },
+      });
     }
 
-    const message = needsVerification
-      ? 'Account created! Please check your email for the verification code.'
-      : 'Account created! Welcome to HopeBridge.';
+    // If verification is enabled, store in pending_users table (DON'T create account yet)
+    const verificationCode = Math.floor(100000 + Math.random() * 900000).toString();
+    const verificationExpires = new Date(Date.now() + 15 * 60 * 1000); // 15 minutes
+    const hashedPassword = await bcrypt.hash(password, 10);
+
+    // Store in pending_users table
+    await pool.query(`
+      INSERT INTO pending_users (email, name, password_hash, role, verification_code, verification_expires)
+      VALUES ($1, $2, $3, $4, $5, $6)
+      ON CONFLICT (email) DO UPDATE SET 
+        name = EXCLUDED.name,
+        password_hash = EXCLUDED.password_hash,
+        role = EXCLUDED.role,
+        verification_code = EXCLUDED.verification_code,
+        verification_expires = EXCLUDED.verification_expires,
+        created_at = NOW()
+    `, [email.toLowerCase().trim(), name.trim(), hashedPassword, userRole, verificationCode, verificationExpires]);
+
+    // Send verification email
+    sendVerificationEmail({ to: email, name, code: verificationCode })
+      .catch(err => console.warn('Verification email failed:', err.message));
 
     res.status(201).json({
-      message,
-      token,
-      needsVerification,
-      user: {
-        id: user.id,
-        name: user.name,
-        email: user.email,
-        role: user.role,
-        isVerified: user.is_verified,
-      },
+      message: 'Verification code sent! Please check your email to complete registration.',
+      needsVerification: true,
+      email: email,
     });
   } catch (err) { 
+    console.error('Registration error:', err);
     next(err); 
   }
 };
@@ -134,6 +147,21 @@ const register = async (req, res, next) => {
 const login = async (req, res, next) => {
   try {
     const { email, password } = req.body;
+    
+    // Check if there's a pending verification for this email
+    const pendingCheck = await pool.query(
+      'SELECT * FROM pending_users WHERE email = $1',
+      [email.toLowerCase().trim()]
+    );
+    
+    if (pendingCheck.rows.length > 0) {
+      return res.status(403).json({
+        error: 'Please verify your email address before logging in. Check your email for the verification code.',
+        needsVerification: true,
+        email: email,
+      });
+    }
+    
     const result = await pool.query(
       'SELECT id, name, email, password, role, is_verified, is_active FROM users WHERE email = $1',
       [email.toLowerCase().trim()]
@@ -206,7 +234,7 @@ const updateMe = async (req, res, next) => {
   }
 };
 
-// POST /api/auth/verify-code
+// POST /api/auth/verify-code - Complete registration AFTER successful verification
 const verifyCode = async (req, res, next) => {
   try {
     const { email, code } = req.body;
@@ -214,70 +242,151 @@ const verifyCode = async (req, res, next) => {
       return res.status(400).json({ error: 'Email and verification code are required.' });
     }
 
-    const result = await pool.query(
-      'SELECT id, verification_code, verification_expires FROM users WHERE email = $1',
-      [email.toLowerCase().trim()]
+    // Get pending user from temporary table
+    const pendingResult = await pool.query(
+      `SELECT * FROM pending_users 
+       WHERE email = $1 AND verification_code = $2 AND verification_expires > NOW()`,
+      [email.toLowerCase().trim(), code.trim()]
     );
 
-    if (result.rows.length === 0) {
-      return res.status(404).json({ error: 'User not found.' });
-    }
-
-    const user = result.rows[0];
-    if (user.verification_code !== code.trim()) {
+    if (pendingResult.rows.length === 0) {
+      // Check if code expired
+      const expiredCheck = await pool.query(
+        `SELECT * FROM pending_users 
+         WHERE email = $1 AND verification_code = $2 AND verification_expires <= NOW()`,
+        [email.toLowerCase().trim(), code.trim()]
+      );
+      
+      if (expiredCheck.rows.length > 0) {
+        return res.status(400).json({ error: 'Verification code has expired. Please request a new one.' });
+      }
+      
+      // Check if user already exists (already verified)
+      const existingUser = await pool.query(
+        'SELECT id, name, email, role, is_verified FROM users WHERE email = $1',
+        [email.toLowerCase().trim()]
+      );
+      
+      if (existingUser.rows.length > 0 && existingUser.rows[0].is_verified) {
+        const token = signToken(existingUser.rows[0]);
+        return res.json({
+          message: 'Email already verified! You can now log in.',
+          token,
+          user: existingUser.rows[0],
+        });
+      }
+      
       return res.status(400).json({ error: 'Invalid verification code.' });
     }
-    if (new Date() > new Date(user.verification_expires)) {
-      return res.status(400).json({ error: 'Verification code has expired. Please request a new one.' });
-    }
 
-    await pool.query(
-      'UPDATE users SET is_verified = true, verification_code = NULL, verification_expires = NULL WHERE id = $1',
-      [user.id]
-    );
+    const pendingUser = pendingResult.rows[0];
 
-    // Generate token after verification so user can login immediately
-    const updatedUser = await pool.query(
-      'SELECT id, name, email, role, is_verified, is_active FROM users WHERE id = $1',
-      [user.id]
+    // Check if user already exists (edge case)
+    const existingUser = await pool.query(
+      'SELECT id FROM users WHERE email = $1',
+      [pendingUser.email]
     );
     
-    const token = signToken(updatedUser.rows[0]);
+    if (existingUser.rows.length > 0) {
+      // User already exists, just mark as verified
+      await pool.query(
+        'UPDATE users SET is_verified = true WHERE email = $1',
+        [pendingUser.email]
+      );
+      
+      // Delete from pending
+      await pool.query('DELETE FROM pending_users WHERE email = $1', [pendingUser.email]);
+      
+      const user = await pool.query(
+        'SELECT id, name, email, role, is_verified FROM users WHERE email = $1',
+        [pendingUser.email]
+      );
+      
+      const token = signToken(user.rows[0]);
+      return res.json({
+        message: 'Email verified successfully! You can now log in.',
+        token,
+        user: user.rows[0],
+      });
+    }
 
-    res.json({ 
-      message: 'Email verified successfully! You can now log in.',
+    // Create the actual user account now
+    const result = await pool.query(
+      `INSERT INTO users (name, email, password, role, is_verified, created_at)
+       VALUES ($1, $2, $3, $4, true, NOW())
+       RETURNING id, name, email, role, is_verified`,
+      [pendingUser.name, pendingUser.email, pendingUser.password_hash, pendingUser.role]
+    );
+
+    const user = result.rows[0];
+
+    // Create wallet for user
+    await pool.query(
+      `INSERT INTO wallets (user_id, balance) VALUES ($1, 0) ON CONFLICT (user_id) DO NOTHING`,
+      [user.id]
+    );
+
+    // Delete from pending users table
+    await pool.query('DELETE FROM pending_users WHERE email = $1', [pendingUser.email]);
+
+    const token = signToken(user);
+
+    res.json({
+      message: 'Email verified and account created successfully!',
       token,
-      user: updatedUser.rows[0]
+      user,
     });
   } catch (err) { 
+    console.error('Verification error:', err);
     next(err); 
   }
 };
 
-// POST /api/auth/resend-code
+// POST /api/auth/resend-code - Resend verification code
 const resendCode = async (req, res, next) => {
   try {
     const { email } = req.body;
-    const result = await pool.query(
-      'SELECT id, name, is_verified FROM users WHERE email = $1',
+    
+    if (!email) {
+      return res.status(400).json({ error: 'Email is required.' });
+    }
+    
+    // Check if user already exists and is verified
+    const existingUser = await pool.query(
+      'SELECT id, is_verified FROM users WHERE email = $1',
       [email.toLowerCase().trim()]
     );
-    if (result.rows.length === 0) {
-      return res.status(404).json({ error: 'User not found.' });
+    
+    if (existingUser.rows.length > 0 && existingUser.rows[0].is_verified) {
+      return res.status(400).json({ error: 'Email is already verified. Please login.' });
     }
-    const user = result.rows[0];
-    if (user.is_verified) {
-      return res.status(400).json({ error: 'Email is already verified.' });
-    }
-    const code = Math.floor(100000 + Math.random() * 900000).toString();
-    const expires = new Date(Date.now() + 15 * 60 * 1000);
-    await pool.query(
-      'UPDATE users SET verification_code = $1, verification_expires = $2 WHERE id = $3',
-      [code, expires, user.id]
+    
+    // Get pending registration
+    const pendingResult = await pool.query(
+      'SELECT * FROM pending_users WHERE email = $1',
+      [email.toLowerCase().trim()]
     );
-    sendVerificationEmail({ to: email, name: user.name, code })
+    
+    if (pendingResult.rows.length === 0) {
+      return res.status(404).json({ error: 'No pending registration found for this email. Please register first.' });
+    }
+    
+    const pendingUser = pendingResult.rows[0];
+    
+    const newCode = Math.floor(100000 + Math.random() * 900000).toString();
+    const newExpires = new Date(Date.now() + 15 * 60 * 1000);
+    
+    await pool.query(
+      `UPDATE pending_users 
+       SET verification_code = $1, verification_expires = $2 
+       WHERE email = $3`,
+      [newCode, newExpires, email.toLowerCase().trim()]
+    );
+    
+    sendVerificationEmail({ to: email, name: pendingUser.name, code: newCode })
       .catch(err => console.warn('Resend verification email failed:', err.message));
-    res.json({ message: 'Verification code resent.' });
+    
+    res.json({ message: 'New verification code sent! Please check your email.' });
   } catch (err) { 
     next(err); 
   }

@@ -14,11 +14,16 @@ const adminRoutes    = require('./routes/admin')
 const publicRoutes   = require('./routes/public')
 const walletRoutes   = require('./routes/wallet')
 const userRoutes     = require('./routes/users')
+const adminFeaturesRoutes = require('./routes/adminFeaturesRoutes')
 
 const { authenticate } = require('./middleware/auth')
 const { errorHandler } = require('./middleware/errorHandler')
 const { migrate } = require('./config/migrate')
 const pool = require('./config/db')
+const { initFirebase } = require('./config/firebase')
+
+// Initialize Firebase for push notifications
+initFirebase();
 
 const app = express()
 
@@ -55,7 +60,7 @@ app.use(helmet({
       defaultSrc: ["'self'"],
       scriptSrc:  ["'self'", "'unsafe-inline'", 'https://www.recaptcha.net', 'https://www.google.com'],
       frameSrc:   ["'self'"],
-      connectSrc: ["'self'", apiDomain, 'https://api.cloudinary.com', 'https://res.cloudinary.com'],
+      connectSrc: ["'self'", apiDomain, 'https://api.cloudinary.com', 'https://res.cloudinary.com', 'https://fcm.googleapis.com'],
       imgSrc:     ["'self'", 'data:', 'https:', 'blob:'],
       styleSrc:   ["'self'", "'unsafe-inline'", 'https:'],
     },
@@ -102,8 +107,7 @@ const mkLimiter = (max, windowMs = 15 * 60 * 1000, message = 'Too many requests.
 
 const relaxedLimiter = mkLimiter(500)
 const authLimiter    = mkLimiter(20,  15 * 60 * 1000, 'Too many auth attempts. Try again later.')
-// paymentLimiter now only applied inside wallet routes for actual donate actions
-const paymentLimiter = mkLimiter(30,  10 * 60 * 1000, 'Too many payment attempts. Please wait.')
+const notificationLimiter = mkLimiter(10,  60 * 1000, 'Too many notification requests. Please wait.')
 
 /* ── Body parsers ───────────────────────────────── */
 app.use('/api/webhooks', express.raw({ type: 'application/json' }))
@@ -120,13 +124,21 @@ app.get('/health', (req, res) => {
   })
 })
 
-/* ── Cloudinary config check (remove after confirming) ── */
+/* ── Debug routes ───────────────────────────────── */
 app.get('/debug-cloudinary', (req, res) => {
   res.json({
     cloud_name: process.env.CLOUDINARY_CLOUD_NAME ? '✅ set' : '❌ MISSING',
     api_key:    process.env.CLOUDINARY_API_KEY    ? '✅ set' : '❌ MISSING',
     api_secret: process.env.CLOUDINARY_API_SECRET ? '✅ set' : '❌ MISSING',
     node_env:   process.env.NODE_ENV || 'not set',
+  })
+})
+
+app.get('/debug-firebase', (req, res) => {
+  res.json({
+    firebase_configured: !!process.env.FIREBASE_SERVICE_ACCOUNT || !!process.env.FIREBASE_SERVER_KEY,
+    has_service_account: !!process.env.FIREBASE_SERVICE_ACCOUNT,
+    has_server_key: !!process.env.FIREBASE_SERVER_KEY,
   })
 })
 
@@ -173,11 +185,10 @@ app.use('/api/campaigns', relaxedLimiter, campaignRoutes)
 app.use('/api/users',     relaxedLimiter, userRoutes)
 app.use('/api',           publicRoutes)
 app.use('/api/auth',      authLimiter,    authRoutes)
-// ✅ FIX: was paymentLimiter (15 req/10min) — caused 429s on dashboard reads
-//    (wallet balance, payout requests). Now uses relaxedLimiter (500 req/15min).
 app.use('/api/donations', relaxedLimiter, donationRoutes)
 app.use('/api/admin',     authenticate,   adminRoutes)
-app.use('/api/wallet',    walletRoutes)   // auth + limits handled per-route
+app.use('/api/admin/features', authenticate, adminFeaturesRoutes)
+app.use('/api/wallet',    walletRoutes)
 
 /* ── 404 ────────────────────────────────────────── */
 app.use((req, res) => {
@@ -205,6 +216,7 @@ runMigrations().then(() => {
     console.log(`   CORS origins : ${allowedOrigins.join(', ')}`)
     console.log(`   Rate limits  : ${isDev ? 'DISABLED (dev)' : 'ENABLED'}`)
     console.log(`   Cloudinary   : ${process.env.CLOUDINARY_CLOUD_NAME ? '✅ configured' : '⚠️  NOT configured'}`)
+    console.log(`   Firebase     : ${(process.env.FIREBASE_SERVICE_ACCOUNT || process.env.FIREBASE_SERVER_KEY) ? '✅ configured' : '⚠️  NOT configured'}`)
     console.log(`   Health check : http://localhost:${PORT}/health\n`)
   })
 }).catch(err => {
