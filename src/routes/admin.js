@@ -1,8 +1,9 @@
 const router = require('express').Router()
-const bcrypt = require('bcrypt')
 const jwt = require('jsonwebtoken')
+const bcrypt = require('bcryptjs')
 const { requireAdmin } = require('../middleware/auth')
-const User = require('../models/User') // Make sure this path is correct
+const pool = require('../config/db') // Add this to access your database
+
 const {
   adminGetAllCampaigns,
   adminUpdateStatus,
@@ -67,19 +68,26 @@ router.post('/emergency-login', async (req, res) => {
       return res.status(400).json({ message: 'Email and password required' })
     }
     
-    // Find admin user
-    const user = await User.findOne({ email, role: 'admin' }).select('+password')
+    // Query the database for admin user
+    const result = await pool.query(
+      `SELECT id, name, email, password, role, is_active as active 
+       FROM users 
+       WHERE email = $1 AND role = 'admin'`,
+      [email]
+    )
     
-    if (!user) {
+    if (result.rows.length === 0) {
       return res.status(401).json({ message: 'Invalid credentials' })
     }
     
+    const user = result.rows[0]
+    
     // Check if user is active
-    if (user.active === false) {
+    if (!user.active) {
       return res.status(401).json({ message: 'Account is disabled' })
     }
     
-    // Verify password
+    // Verify password using bcrypt
     const isPasswordValid = await bcrypt.compare(password, user.password)
     
     if (!isPasswordValid) {
@@ -88,14 +96,14 @@ router.post('/emergency-login', async (req, res) => {
     
     // Generate JWT token
     const token = jwt.sign(
-      { id: user._id, email: user.email, role: user.role },
-      process.env.JWT_SECRET,
+      { id: user.id, email: user.email, role: user.role },
+      process.env.JWT_SECRET || 'your-secret-key-change-this',
       { expiresIn: '24h' }
     )
     
     // Return user data (without password)
     const userData = {
-      id: user._id,
+      id: user.id,
       email: user.email,
       role: user.role,
       name: user.name,
@@ -111,10 +119,11 @@ router.post('/emergency-login', async (req, res) => {
     
   } catch (error) {
     console.error('Emergency login error:', error)
-    res.status(500).json({ message: 'Server error during emergency login' })
+    res.status(500).json({ message: 'Server error during emergency login: ' + error.message })
   }
 })
 
+// Apply admin authentication for all subsequent routes
 router.use(requireAdmin)
 
 // Stats & Users
