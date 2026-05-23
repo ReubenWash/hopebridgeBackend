@@ -10,6 +10,8 @@ const {
 const { adminGetAllDonations } = require('../controllers/donationController')
 const {
   getStats, getAllUsers, toggleUserActive,
+  addUser, deleteUser, verifyUser, unverifyUser,
+  changePassword, addAdmin,
   getDisputes, createDispute, resolveDispute,
   getTheme, saveTheme,
   getSettings, saveSettings,
@@ -58,6 +60,14 @@ router.use(requireAdmin)
 router.get('/stats', getStats)
 router.get('/users', getAllUsers)
 router.patch('/users/:id/toggle', toggleUserActive)
+
+// ============ USER MANAGEMENT (NEW) ============
+router.post('/users', addUser)                                    // Add new user
+router.delete('/users/:id', deleteUser)                          // Delete user
+router.patch('/users/:id/verify', verifyUser)                    // Verify user
+router.patch('/users/:id/unverify', unverifyUser)                // Unverify user
+router.post('/change-password', changePassword)                  // Change admin password
+router.post('/admins', addAdmin)                                 // Add new admin
 
 // Campaigns
 router.get('/campaigns', adminGetAllCampaigns)

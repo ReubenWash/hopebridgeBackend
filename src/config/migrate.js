@@ -25,6 +25,10 @@ const migrate = async (closePool = true) => {
     }
 
     await client.query(`
+      -- ============================================
+      -- CORE TABLES
+      -- ============================================
+
       -- USERS
       CREATE TABLE IF NOT EXISTS users (
         id SERIAL PRIMARY KEY,
@@ -211,7 +215,9 @@ const migrate = async (closePool = true) => {
         UNIQUE(admin_id, token)
       );
 
-      -- ============ NEW TABLES FOR ENHANCED FEATURES ============
+      -- ============================================
+      -- ENHANCED FEATURES TABLES
+      -- ============================================
 
       -- PLATFORM FEES
       CREATE TABLE IF NOT EXISTS platform_fees (
@@ -304,6 +310,10 @@ const migrate = async (closePool = true) => {
         updated_at TIMESTAMPTZ DEFAULT NOW()
       );
 
+      -- ============================================
+      -- VIEWS
+      -- ============================================
+
       -- TOP DONORS VIEW (Helper)
       CREATE OR REPLACE VIEW top_donors_view AS
       SELECT 
@@ -318,6 +328,10 @@ const migrate = async (closePool = true) => {
       WHERE u.role = 'donor'
       GROUP BY u.id
       ORDER BY total_donated DESC;
+
+      -- ============================================
+      -- FUNCTIONS & TRIGGERS
+      -- ============================================
 
       -- AUTO UPDATE FUNCTION
       CREATE OR REPLACE FUNCTION update_updated_at()
@@ -418,7 +432,7 @@ const migrate = async (closePool = true) => {
       ALTER TABLE audit_logs ADD COLUMN IF NOT EXISTS user_agent TEXT;
     `)
 
-    // Create indexes for better performance (only if they don't exist)
+    // Create indexes for better performance
     await client.query(`
       CREATE INDEX IF NOT EXISTS idx_pending_users_email ON pending_users(email);
       CREATE INDEX IF NOT EXISTS idx_pending_users_code ON pending_users(verification_code);
@@ -438,14 +452,14 @@ const migrate = async (closePool = true) => {
       CREATE INDEX IF NOT EXISTS idx_donations_created_at ON donations(created_at);
     `)
 
-    // ✅ Add the correct type constraint to wallet_transactions
+    // Add the correct type constraint to wallet_transactions
     await client.query(`
       ALTER TABLE wallet_transactions DROP CONSTRAINT IF EXISTS wallet_transactions_type_check;
       ALTER TABLE wallet_transactions ADD CONSTRAINT wallet_transactions_type_check 
       CHECK (type IN ('deposit', 'donation_out', 'refund_in', 'withdrawal_out', 'escrow_hold', 'escrow_release', 'escrow_refund', 'fee_deduction'));
     `)
 
-    // ✅ Rename user_id to donor_id in escrow_holds if it exists
+    // Rename user_id to donor_id in escrow_holds if it exists
     await client.query(`
       DO $$ 
       BEGIN
@@ -456,12 +470,12 @@ const migrate = async (closePool = true) => {
       END $$;
     `)
 
-    // ✅ Ensure donor_id column exists
+    // Ensure donor_id column exists
     await client.query(`
       ALTER TABLE escrow_holds ADD COLUMN IF NOT EXISTS donor_id INTEGER REFERENCES users(id) ON DELETE CASCADE;
     `)
 
-    // ✅ Insert default settings (only if they don't exist)
+    // Insert default settings
     await client.query(`
       INSERT INTO settings (key, value) VALUES 
         ('cloudinary_cloud_name', ''),
@@ -486,7 +500,7 @@ const migrate = async (closePool = true) => {
       ON CONFLICT (key) DO NOTHING;
     `)
 
-    // ✅ Insert default email templates (only if they don't exist)
+    // Insert default email templates
     await client.query(`
       INSERT INTO email_templates (template_key, subject, body_text, variables) VALUES 
         ('verification', 'Your HopeBridge Verification Code', 
@@ -510,7 +524,7 @@ const migrate = async (closePool = true) => {
       ON CONFLICT (template_key) DO NOTHING;
     `)
 
-    // ✅ Insert default platform fees (only if table is empty)
+    // Insert default platform fees (only if table is empty)
     const feeCheck = await client.query(`SELECT COUNT(*) FROM platform_fees`)
     if (parseInt(feeCheck.rows[0].count) === 0) {
       await client.query(`
@@ -519,35 +533,35 @@ const migrate = async (closePool = true) => {
       `)
     }
 
-    // ✅ Remove old PayPal/Firebase settings if they exist (cleanup)
+    // Remove old PayPal/Firebase settings if they exist (cleanup)
     await client.query(`
       DELETE FROM settings WHERE key IN (
         'paypal_client_id', 'paypal_client_secret', 'paypal_mode', 'firebase_config'
       );
     `)
 
-    // ✅ Update deposit_requests constraint
+    // Update deposit_requests constraint
     await client.query(`
       ALTER TABLE deposit_requests DROP CONSTRAINT IF EXISTS deposit_requests_status_check;
       ALTER TABLE deposit_requests ADD CONSTRAINT deposit_requests_status_check 
       CHECK (status IN ('pending', 'instructions_sent', 'awaiting_proof', 'approved', 'rejected'));
     `)
 
-    // ✅ Update withdrawal_requests constraint
+    // Update withdrawal_requests constraint
     await client.query(`
       ALTER TABLE withdrawal_requests DROP CONSTRAINT IF EXISTS withdrawal_requests_status_check;
       ALTER TABLE withdrawal_requests ADD CONSTRAINT withdrawal_requests_status_check 
       CHECK (status IN ('pending', 'approved', 'rejected', 'paid'));
     `)
 
-    // ✅ Update donations escrow_status constraint
+    // Update donations escrow_status constraint
     await client.query(`
       ALTER TABLE donations DROP CONSTRAINT IF EXISTS donations_escrow_status_check;
       ALTER TABLE donations ADD CONSTRAINT donations_escrow_status_check 
       CHECK (escrow_status IN ('held', 'released', 'refunded'));
     `)
 
-    // ✅ Ensure campaigns status includes 'completed'
+    // Ensure campaigns status includes 'completed'
     await client.query(`
       ALTER TABLE campaigns DROP CONSTRAINT IF EXISTS campaigns_status_check;
       ALTER TABLE campaigns ADD CONSTRAINT campaigns_status_check 
@@ -566,7 +580,7 @@ const migrate = async (closePool = true) => {
       DELETE FROM pending_users WHERE created_at < NOW() - INTERVAL '24 hours'
     `)
 
-    // Check if admin exists before seeding
+    // Seed admin user
     const adminCheck = await client.query(`SELECT id FROM users WHERE email = 'admin@hopebridge.com'`)
     if (adminCheck.rows.length === 0) {
       const adminHash = await bcrypt.hash('admin123', 10)
@@ -577,7 +591,7 @@ const migrate = async (closePool = true) => {
       console.log('👑 Admin user created')
     }
 
-    // Check if demo creator exists
+    // Seed demo creator
     const creatorCheck = await client.query(`SELECT id FROM users WHERE email = 'creator@demo.com'`)
     if (creatorCheck.rows.length === 0) {
       const demoHash = await bcrypt.hash('demo123', 10)
@@ -588,7 +602,7 @@ const migrate = async (closePool = true) => {
       console.log('👤 Demo creator created')
     }
 
-    // Check if demo donor exists
+    // Seed demo donor
     const donorCheck = await client.query(`SELECT id FROM users WHERE email = 'donor@demo.com'`)
     if (donorCheck.rows.length === 0) {
       const donorHash = await bcrypt.hash('donor123', 10)

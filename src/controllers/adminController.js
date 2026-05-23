@@ -1,5 +1,6 @@
 const pool = require('../config/db');
-const { sendMassEmail } = require('../utils/email');
+const bcrypt = require('bcryptjs');
+const { sendMassEmail, sendWelcomeEmail } = require('../utils/email');
 
 // ── Stats ───────────────────────────────────────────────────────────
 const getStats = async (req, res, next) => {
@@ -52,6 +53,227 @@ const toggleUserActive = async (req, res, next) => {
     res.json({
       message: `User ${user.is_active ? 'activated' : 'deactivated'} successfully.`,
       user,
+    });
+  } catch (err) { next(err); }
+};
+
+// ── Add New User (Admin) ────────────────────────────────────────────
+const addUser = async (req, res, next) => {
+  try {
+    const { name, email, password, role = 'donor', is_verified = true } = req.body;
+    
+    // Check if user already exists
+    const existing = await pool.query('SELECT id FROM users WHERE email = $1', [email]);
+    if (existing.rows.length > 0) {
+      return res.status(409).json({ error: 'User with this email already exists' });
+    }
+    
+    const hashedPassword = await bcrypt.hash(password, 10);
+    
+    const result = await pool.query(
+      `INSERT INTO users (name, email, password, role, is_verified, is_active)
+       VALUES ($1, $2, $3, $4, $5, true)
+       RETURNING id, name, email, role, is_verified, created_at`,
+      [name.trim(), email.toLowerCase().trim(), hashedPassword, role, is_verified]
+    );
+    
+    const user = result.rows[0];
+    
+    // Create wallet for user
+    await pool.query(
+      `INSERT INTO wallets (user_id, balance) VALUES ($1, 0) ON CONFLICT (user_id) DO NOTHING`,
+      [user.id]
+    );
+    
+    // Send welcome email
+    sendWelcomeEmail({ to: user.email, name: user.name, role: user.role })
+      .catch(err => console.warn('Welcome email failed:', err.message));
+    
+    // Log to audit
+    await pool.query(`
+      INSERT INTO audit_logs (admin_id, action, entity_type, entity_id, details, ip_address)
+      VALUES ($1, $2, $3, $4, $5, $6)
+    `, [req.user.id, 'user_added', 'user', user.id, JSON.stringify({ name, email, role }), req.ip]);
+    
+    res.status(201).json({
+      message: `User ${user.name} added successfully`,
+      user
+    });
+  } catch (err) { next(err); }
+};
+
+// ── Delete User (Admin) ─────────────────────────────────────────────
+const deleteUser = async (req, res, next) => {
+  const { id } = req.params;
+  const client = await pool.connect();
+  
+  try {
+    await client.query('BEGIN');
+    
+    // Check if user exists and is not admin
+    const userCheck = await client.query(
+      'SELECT id, name, email, role FROM users WHERE id = $1',
+      [id]
+    );
+    
+    if (userCheck.rows.length === 0) {
+      await client.query('ROLLBACK');
+      return res.status(404).json({ error: 'User not found' });
+    }
+    
+    if (userCheck.rows[0].role === 'admin') {
+      await client.query('ROLLBACK');
+      return res.status(403).json({ error: 'Cannot delete admin accounts' });
+    }
+    
+    // Log to audit before deletion
+    await client.query(`
+      INSERT INTO audit_logs (admin_id, action, entity_type, entity_id, details, ip_address)
+      VALUES ($1, $2, $3, $4, $5, $6)
+    `, [req.user.id, 'user_deleted', 'user', id, JSON.stringify({ user: userCheck.rows[0] }), req.ip]);
+    
+    // Delete user (cascade will handle related records)
+    await client.query('DELETE FROM users WHERE id = $1', [id]);
+    
+    await client.query('COMMIT');
+    
+    res.json({ message: `User ${userCheck.rows[0].name} permanently deleted` });
+  } catch (err) {
+    await client.query('ROLLBACK');
+    next(err);
+  } finally {
+    client.release();
+  }
+};
+
+// ── Verify User (Admin) ─────────────────────────────────────────────
+const verifyUser = async (req, res, next) => {
+  try {
+    const { id } = req.params;
+    
+    const result = await pool.query(
+      `UPDATE users SET is_verified = true WHERE id = $1 AND role != 'admin'
+       RETURNING id, name, email, role, is_verified`,
+      [id]
+    );
+    
+    if (result.rows.length === 0) {
+      return res.status(404).json({ error: 'User not found or cannot modify admin' });
+    }
+    
+    // Log to audit
+    await pool.query(`
+      INSERT INTO audit_logs (admin_id, action, entity_type, entity_id, details, ip_address)
+      VALUES ($1, $2, $3, $4, $5, $6)
+    `, [req.user.id, 'user_verified', 'user', id, JSON.stringify({ user: result.rows[0] }), req.ip]);
+    
+    res.json({ message: `User ${result.rows[0].name} verified successfully`, user: result.rows[0] });
+  } catch (err) { next(err); }
+};
+
+// ── Unverify User (Admin) ───────────────────────────────────────────
+const unverifyUser = async (req, res, next) => {
+  try {
+    const { id } = req.params;
+    
+    const result = await pool.query(
+      `UPDATE users SET is_verified = false WHERE id = $1 AND role != 'admin'
+       RETURNING id, name, email, role, is_verified`,
+      [id]
+    );
+    
+    if (result.rows.length === 0) {
+      return res.status(404).json({ error: 'User not found or cannot modify admin' });
+    }
+    
+    // Log to audit
+    await pool.query(`
+      INSERT INTO audit_logs (admin_id, action, entity_type, entity_id, details, ip_address)
+      VALUES ($1, $2, $3, $4, $5, $6)
+    `, [req.user.id, 'user_unverified', 'user', id, JSON.stringify({ user: result.rows[0] }), req.ip]);
+    
+    res.json({ message: `User ${result.rows[0].name} unverified`, user: result.rows[0] });
+  } catch (err) { next(err); }
+};
+
+// ── Change Password (Admin) ─────────────────────────────────────────
+const changePassword = async (req, res, next) => {
+  try {
+    const { oldPassword, newPassword } = req.body;
+    const userId = req.user.id;
+    
+    // Get current user
+    const result = await pool.query(
+      'SELECT password FROM users WHERE id = $1',
+      [userId]
+    );
+    
+    if (result.rows.length === 0) {
+      return res.status(404).json({ error: 'User not found' });
+    }
+    
+    // Verify old password
+    const valid = await bcrypt.compare(oldPassword, result.rows[0].password);
+    if (!valid) {
+      return res.status(401).json({ error: 'Current password is incorrect' });
+    }
+    
+    // Hash new password
+    const hashedPassword = await bcrypt.hash(newPassword, 10);
+    
+    // Update password
+    await pool.query(
+      'UPDATE users SET password = $1, updated_at = NOW() WHERE id = $2',
+      [hashedPassword, userId]
+    );
+    
+    // Log to audit
+    await pool.query(`
+      INSERT INTO audit_logs (admin_id, action, entity_type, entity_id, details, ip_address)
+      VALUES ($1, $2, $3, $4, $5, $6)
+    `, [req.user.id, 'password_changed', 'user', userId, JSON.stringify({ admin: true }), req.ip]);
+    
+    res.json({ message: 'Password changed successfully' });
+  } catch (err) { next(err); }
+};
+
+// ── Add Admin User ──────────────────────────────────────────────────
+const addAdmin = async (req, res, next) => {
+  try {
+    const { name, email, password } = req.body;
+    
+    // Check if user already exists
+    const existing = await pool.query('SELECT id FROM users WHERE email = $1', [email]);
+    if (existing.rows.length > 0) {
+      return res.status(409).json({ error: 'User with this email already exists' });
+    }
+    
+    const hashedPassword = await bcrypt.hash(password, 10);
+    
+    const result = await pool.query(
+      `INSERT INTO users (name, email, password, role, is_verified, is_active)
+       VALUES ($1, $2, $3, 'admin', true, true)
+       RETURNING id, name, email, role, created_at`,
+      [name.trim(), email.toLowerCase().trim(), hashedPassword]
+    );
+    
+    const user = result.rows[0];
+    
+    // Create wallet for admin
+    await pool.query(
+      `INSERT INTO wallets (user_id, balance) VALUES ($1, 0) ON CONFLICT (user_id) DO NOTHING`,
+      [user.id]
+    );
+    
+    // Log to audit
+    await pool.query(`
+      INSERT INTO audit_logs (admin_id, action, entity_type, entity_id, details, ip_address)
+      VALUES ($1, $2, $3, $4, $5, $6)
+    `, [req.user.id, 'admin_added', 'user', user.id, JSON.stringify({ name, email }), req.ip]);
+    
+    res.status(201).json({
+      message: `Admin ${user.name} added successfully`,
+      user
     });
   } catch (err) { next(err); }
 };
@@ -487,6 +709,12 @@ module.exports = {
   getStats, 
   getAllUsers, 
   toggleUserActive,
+  addUser,
+  deleteUser,
+  verifyUser,
+  unverifyUser,
+  changePassword,
+  addAdmin,
   getDisputes, 
   createDispute, 
   resolveDispute,

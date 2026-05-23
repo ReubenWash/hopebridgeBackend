@@ -40,57 +40,81 @@ if (!fs.existsSync(uploadsDir)) {
   console.log('📁 Created uploads directory')
 }
 
-/* ── CORS ───────────────────────────────────────── */
+/* ── CORS Configuration (Updated for Vercel) ───────────────────────── */
 const rawOrigins = process.env.CLIENT_URL || ''
 const allowedOrigins = [
   ...rawOrigins.split(',').map(o => o.trim()).filter(Boolean),
   'https://hopebridge-inky.vercel.app',
+  'https://hopebridge-kyz32078d-reubens-projects-1edfc122.vercel.app',
+  'https://hopebridge-git-main-reubens-projects-1edfc122.vercel.app',
+  'https://hopebridge-*.vercel.app',
   'http://localhost:5173',
   'http://localhost:3000',
+  'http://localhost:5000',
 ]
 
-console.log('🌐 CORS allowed origins:', allowedOrigins)
+// Allow any Vercel preview deployment
+const isVercelPreview = (origin) => {
+  return origin && (
+    origin.includes('.vercel.app') ||
+    origin.includes('vercel.app')
+  )
+}
 
-/* ── Helmet ─────────────────────────────────────── */
-const apiDomain = process.env.API_URL || 'https://cooing-rosanna-rub-3a11fd0e.koyeb.app'
+console.log('🌐 CORS allowed origins:', allowedOrigins)
 
 app.use(helmet({
   contentSecurityPolicy: {
     directives: {
       defaultSrc: ["'self'"],
-      scriptSrc:  ["'self'", "'unsafe-inline'", 'https://www.recaptcha.net', 'https://www.google.com'],
-      frameSrc:   ["'self'"],
-      connectSrc: ["'self'", apiDomain, 'https://api.cloudinary.com', 'https://res.cloudinary.com', 'https://fcm.googleapis.com'],
-      imgSrc:     ["'self'", 'data:', 'https:', 'blob:'],
+      scriptSrc:  ["'self'", "'unsafe-inline'", 'https://www.recaptcha.net', 'https://www.google.com', 'https://vercel.live', 'https://vercel.com'],
+      frameSrc:   ["'self'", 'https://vercel.live'],
+      connectSrc: ["'self'", apiDomain, 'https://api.cloudinary.com', 'https://res.cloudinary.com', 'https://fcm.googleapis.com', 'https://vercel.live'],
+      imgSrc:     ["'self'", 'data:', 'https:', 'blob:', 'https://vercel.com'],
       styleSrc:   ["'self'", "'unsafe-inline'", 'https:'],
     },
   },
 }))
 
+// Enhanced CORS middleware
 app.use(cors({
   origin: (origin, callback) => {
+    // Allow requests with no origin (like mobile apps or curl)
     if (!origin) return callback(null, true)
+    
+    // Allow any Vercel preview deployment
+    if (isVercelPreview(origin)) {
+      console.log('✅ CORS allowed (Vercel preview):', origin)
+      return callback(null, true)
+    }
+    
+    // Check against allowed origins list
     if (allowedOrigins.includes(origin)) {
+      console.log('✅ CORS allowed:', origin)
       callback(null, true)
     } else {
       console.warn('🚫 Blocked CORS from:', origin)
-      callback(new Error('Not allowed by CORS'))
+      callback(new Error(`CORS policy: Origin ${origin} not allowed`))
     }
   },
   credentials: true,
-  methods: ['GET', 'POST', 'PUT', 'PATCH', 'DELETE', 'OPTIONS'],
-  allowedHeaders: ['Content-Type', 'Authorization', 'X-Requested-With'],
+  methods: ['GET', 'POST', 'PUT', 'PATCH', 'DELETE', 'OPTIONS', 'HEAD'],
+  allowedHeaders: ['Content-Type', 'Authorization', 'X-Requested-With', 'Accept', 'Origin'],
+  exposedHeaders: ['Content-Range', 'X-Content-Range'],
+  maxAge: 86400, // 24 hours
 }))
 
+// Pre-flight requests
 app.options('*', cors())
 
-/* ── Static uploads ─────────────────────────────── */
+/* ── Static uploads with CORS headers ─────────────────────────────── */
 app.use('/uploads', (req, res, next) => {
   const origin = req.headers.origin
-  if (origin && allowedOrigins.includes(origin)) {
+  if (origin && (allowedOrigins.includes(origin) || isVercelPreview(origin))) {
     res.setHeader('Access-Control-Allow-Origin', origin)
   }
   res.setHeader('Cross-Origin-Resource-Policy', 'cross-origin')
+  res.setHeader('Cross-Origin-Embedder-Policy', 'credentialless')
   next()
 }, express.static(uploadsDir))
 
@@ -103,6 +127,10 @@ const mkLimiter = (max, windowMs = 15 * 60 * 1000, message = 'Too many requests.
     standardHeaders: true,
     legacyHeaders: false,
     skip: () => isDev,
+    keyGenerator: (req) => {
+      // Use IP address for rate limiting behind proxy
+      return req.ip || req.connection.remoteAddress
+    },
   })
 
 const relaxedLimiter = mkLimiter(500)
@@ -121,10 +149,24 @@ app.get('/health', (req, res) => {
     service: 'HopeBridge API',
     env:     process.env.NODE_ENV || 'development',
     time:    new Date().toISOString(),
+    cors: {
+      allowedOrigins: allowedOrigins,
+      vercelPreviews: true,
+    },
   })
 })
 
 /* ── Debug routes ───────────────────────────────── */
+app.get('/debug-cors', (req, res) => {
+  res.json({
+    allowedOrigins: allowedOrigins,
+    clientUrl: process.env.CLIENT_URL,
+    requestOrigin: req.headers.origin,
+    requestHost: req.headers.host,
+    vercelPreview: isVercelPreview(req.headers.origin),
+  })
+})
+
 app.get('/debug-cloudinary', (req, res) => {
   res.json({
     cloud_name: process.env.CLOUDINARY_CLOUD_NAME ? '✅ set' : '❌ MISSING',
@@ -190,12 +232,16 @@ app.use('/api/admin',     authenticate,   adminRoutes)
 app.use('/api/admin/features', authenticate, adminFeaturesRoutes)
 app.use('/api/wallet',    walletRoutes)
 
-/* ── 404 ────────────────────────────────────────── */
+/* ── 404 handler ────────────────────────────────── */
 app.use((req, res) => {
-  res.status(404).json({ error: `Route ${req.method} ${req.path} not found.` })
+  res.status(404).json({ 
+    error: `Route ${req.method} ${req.path} not found.`,
+    path: req.path,
+    method: req.method,
+  })
 })
 
-/* ── Error handler ──────────────────────────────── */
+/* ── Global error handler ──────────────────────────────── */
 app.use(errorHandler)
 
 /* ── Migrations + start ─────────────────────────── */
@@ -210,10 +256,11 @@ const runMigrations = async () => {
 }
 
 runMigrations().then(() => {
-  app.listen(PORT, () => {
-    console.log(`\n🚀 HopeBridge API → http://localhost:${PORT}`)
+  app.listen(PORT, '0.0.0.0', () => {
+    console.log(`\n🚀 HopeBridge API → http://0.0.0.0:${PORT}`)
     console.log(`   Env          : ${process.env.NODE_ENV || 'development'}`)
     console.log(`   CORS origins : ${allowedOrigins.join(', ')}`)
+    console.log(`   Vercel previews: ✅ Allowed`)
     console.log(`   Rate limits  : ${isDev ? 'DISABLED (dev)' : 'ENABLED'}`)
     console.log(`   Cloudinary   : ${process.env.CLOUDINARY_CLOUD_NAME ? '✅ configured' : '⚠️  NOT configured'}`)
     console.log(`   Firebase     : ${(process.env.FIREBASE_SERVICE_ACCOUNT || process.env.FIREBASE_SERVER_KEY) ? '✅ configured' : '⚠️  NOT configured'}`)
