@@ -321,7 +321,6 @@ const adjustWalletBalance = async (req, res, next) => {
   const client = await pool.connect();
 
   try {
-    // Validate required fields
     if (!userId) {
       return res.status(400).json({ error: 'User ID is required' });
     }
@@ -330,7 +329,6 @@ const adjustWalletBalance = async (req, res, next) => {
       return res.status(400).json({ error: 'Valid amount is required' });
     }
 
-    // Map frontend types to internal types
     let transactionType = (type || 'credit').toLowerCase();
     
     if (transactionType === 'add') {
@@ -339,15 +337,14 @@ const adjustWalletBalance = async (req, res, next) => {
       transactionType = 'debit';
     }
     
-    const isCredit = transactionType === 'credit' || transactionType === 'deposit' || transactionType === 'refund';
+    const isCredit = transactionType === 'credit' || transactionType === 'deposit';
     const isDebit = transactionType === 'debit' || transactionType === 'withdrawal';
     
-    // Use admin_credit/admin_debit for database (definitely in constraint)
-    const dbType = isCredit ? 'admin_credit' : 'admin_debit';
+    // Use existing types from the constraint
+    const dbType = isCredit ? 'deposit' : 'withdrawal_out';
     
     await client.query('BEGIN');
 
-    // Check if user exists
     const userCheck = await client.query(
       'SELECT id, name, email, role FROM users WHERE id = $1',
       [userId]
@@ -368,7 +365,6 @@ const adjustWalletBalance = async (req, res, next) => {
       finalAmount = -adjustmentAmount;
     }
 
-    // Get current wallet balance for validation
     const walletCheck = await client.query(
       'SELECT balance FROM wallets WHERE user_id = $1',
       [userId]
@@ -384,14 +380,12 @@ const adjustWalletBalance = async (req, res, next) => {
       });
     }
 
-    // Update wallet balance
     await client.query(
       `INSERT INTO wallets (user_id, balance) VALUES ($1, $2)
        ON CONFLICT (user_id) DO UPDATE SET balance = wallets.balance + $2, updated_at = NOW()`,
       [userId, balanceChange]
     );
 
-    // Record transaction with dbType (admin_credit or admin_debit)
     const transactionDesc = isCredit
       ? `Admin credit: ${reason || 'Manual adjustment by admin'}`
       : `Admin debit: ${reason || 'Manual adjustment by admin'}`;
@@ -404,7 +398,6 @@ const adjustWalletBalance = async (req, res, next) => {
       [userId, finalAmount, dbType, reference, transactionDesc]
     );
 
-    // Also update users table wallet_balance
     const newBalanceResult = await client.query(
       'SELECT balance FROM wallets WHERE user_id = $1',
       [userId]
@@ -416,7 +409,6 @@ const adjustWalletBalance = async (req, res, next) => {
       [newBalance, userId]
     );
 
-    // Log to audit
     await client.query(
       `INSERT INTO audit_logs (admin_id, action, entity_type, entity_id, details, ip_address, created_at)
        VALUES ($1, $2, $3, $4, $5, $6, NOW())`,

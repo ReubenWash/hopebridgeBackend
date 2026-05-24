@@ -748,18 +748,37 @@ const adminRefundCampaignEscrow = async (req, res, next) => {
 
 const getCompletionRequests = async (req, res, next) => {
   try {
-    const result = await pool.query(
-      `SELECT id, title, creator_id, completion_requested_at
-       FROM campaigns
-       WHERE completion_requested = TRUE AND status = 'approved'
-       ORDER BY completion_requested_at ASC`
-    );
+    console.log('📋 Fetching completion requests...');
+    
+    const result = await pool.query(`
+      SELECT 
+        c.id,
+        c.title,
+        c.creator_id,
+        c.completion_requested,
+        c.completion_requested_at,
+        c.status,
+        u.name as creator_name,
+        u.email as creator_email
+      FROM campaigns c
+      JOIN users u ON c.creator_id = u.id
+      WHERE c.completion_requested = TRUE 
+        AND c.status = 'approved'
+      ORDER BY c.completion_requested_at DESC
+    `);
+    
+    console.log(`✅ Found ${result.rows.length} completion requests`);
+    
     res.json({ campaigns: result.rows });
   } catch (err) {
-    next(err);
+    console.error('❌ Error in getCompletionRequests:', err.message);
+    console.error('Error stack:', err.stack);
+    res.status(500).json({ 
+      error: 'Failed to fetch completion requests',
+      details: err.message 
+    });
   }
 };
-
 const getRelatedCampaigns = async (req, res, next) => {
   try {
     const { id } = req.params;
