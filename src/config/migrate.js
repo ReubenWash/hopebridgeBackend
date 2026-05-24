@@ -107,6 +107,24 @@ const migrate = async (closePool = true) => {
         created_at TIMESTAMPTZ DEFAULT NOW()
       );
 
+      -- GUEST DONATIONS (NEW - for donations without account)
+      CREATE TABLE IF NOT EXISTS guest_donations (
+        id SERIAL PRIMARY KEY,
+        campaign_id INTEGER REFERENCES campaigns(id) ON DELETE CASCADE,
+        guest_name VARCHAR(100),
+        guest_email VARCHAR(255) NOT NULL,
+        amount NUMERIC(10,2) NOT NULL CHECK (amount > 0),
+        message TEXT,
+        payment_method VARCHAR(50) DEFAULT 'bank_transfer',
+        payment_status VARCHAR(50) DEFAULT 'pending_instructions',
+        admin_instructions TEXT,
+        admin_notes TEXT,
+        proof_image_url TEXT,
+        donation_id INTEGER,
+        created_at TIMESTAMPTZ DEFAULT NOW(),
+        updated_at TIMESTAMPTZ DEFAULT NOW()
+      );
+
       -- CREATOR PAYMENT METHODS
       CREATE TABLE IF NOT EXISTS creator_payment_methods (
         user_id INTEGER PRIMARY KEY REFERENCES users(id) ON DELETE CASCADE,
@@ -311,6 +329,14 @@ const migrate = async (closePool = true) => {
       );
 
       -- ============================================
+      -- INDEXES FOR GUEST DONATIONS
+      -- ============================================
+
+      CREATE INDEX IF NOT EXISTS idx_guest_donations_email ON guest_donations(guest_email);
+      CREATE INDEX IF NOT EXISTS idx_guest_donations_campaign ON guest_donations(campaign_id);
+      CREATE INDEX IF NOT EXISTS idx_guest_donations_status ON guest_donations(payment_status);
+
+      -- ============================================
       -- VIEWS
       -- ============================================
 
@@ -398,6 +424,14 @@ const migrate = async (closePool = true) => {
           FOR EACH ROW EXECUTE FUNCTION update_updated_at();
         END IF;
       END $$;
+
+      DO $$ BEGIN
+        IF NOT EXISTS (SELECT 1 FROM pg_trigger WHERE tgname = 'guest_donations_updated') THEN
+          CREATE TRIGGER guest_donations_updated
+          BEFORE UPDATE ON guest_donations
+          FOR EACH ROW EXECUTE FUNCTION update_updated_at();
+        END IF;
+      END $$;
     `)
 
     // Add missing columns if they don't exist (safe ALTER TABLE)
@@ -430,6 +464,17 @@ const migrate = async (closePool = true) => {
       ALTER TABLE creator_verifications ADD COLUMN IF NOT EXISTS business_name VARCHAR(200);
       ALTER TABLE creator_verifications ADD COLUMN IF NOT EXISTS business_tax_id VARCHAR(100);
       ALTER TABLE audit_logs ADD COLUMN IF NOT EXISTS user_agent TEXT;
+      
+      -- Guest donations columns (ensure they exist)
+      ALTER TABLE guest_donations ADD COLUMN IF NOT EXISTS payment_method VARCHAR(50) DEFAULT 'bank_transfer';
+      ALTER TABLE guest_donations ADD COLUMN IF NOT EXISTS admin_notes TEXT;
+    `)
+
+    // Add guest_donations status constraint
+    await client.query(`
+      ALTER TABLE guest_donations DROP CONSTRAINT IF EXISTS check_payment_status;
+      ALTER TABLE guest_donations ADD CONSTRAINT check_payment_status 
+      CHECK (payment_status IN ('pending_instructions', 'instructions_sent', 'pending_verification', 'approved', 'rejected'));
     `)
 
     // Create indexes for better performance
@@ -520,7 +565,16 @@ const migrate = async (closePool = true) => {
          '["creator_name","title","reason"]'),
         ('withdrawal_status', 'Your withdrawal of ${{amount}} has been {{status}}', 
          'Dear {{name}},\\n\\nYour withdrawal request of ${{amount}} has been {{status}}.\\n\\n{{admin_note}}\\n\\nIf you have any questions, please contact support.\\n\\nThe HopeBridge Team', 
-         '["name","amount","status","admin_note"]')
+         '["name","amount","status","admin_note"]'),
+        ('guest_donation_instructions', 'Payment Instructions for Your Donation', 
+         'Dear {{guest_name}},\\n\\nThank you for your generous donation of ${{amount}} to {{campaign_title}}.\\n\\nPayment Instructions:\\n{{instructions}}\\n\\nPlease make the payment and upload your proof here: {{upload_link}}\\n\\nThe HopeBridge Team', 
+         '["guest_name","amount","campaign_title","instructions","upload_link"]'),
+        ('guest_donation_approved', 'Your Donation Has Been Confirmed!', 
+         'Dear {{guest_name}},\\n\\nGreat news! Your donation of ${{amount}} to {{campaign_title}} has been verified and approved.\\n\\nThank you for your generosity!\\n\\nThe HopeBridge Team', 
+         '["guest_name","amount","campaign_title"]'),
+        ('guest_donation_rejected', 'Update Regarding Your Donation', 
+         'Dear {{guest_name}},\\n\\nWe were unable to verify your donation of ${{amount}} to {{campaign_title}}.\\n\\nReason: {{reason}}\\n\\nPlease contact support if you believe this is an error.\\n\\nThe HopeBridge Team', 
+         '["guest_name","amount","campaign_title","reason"]')
       ON CONFLICT (template_key) DO NOTHING;
     `)
 
@@ -637,6 +691,8 @@ const migrate = async (closePool = true) => {
     console.log('✅ Added completed status to campaigns')
     console.log('🖼️ Added image_file_id column for ImageKit.io integration')
     console.log('🏆 Top donors view created')
+    console.log('👥 GUEST DONATIONS table created for account-less donations')
+    console.log('📧 Guest donation email templates added')
 
   } catch (err) {
     console.error('❌ Migration failed:', err.message)

@@ -16,7 +16,8 @@ const publicRoutes   = require('./routes/public')
 const walletRoutes   = require('./routes/wallet')
 const userRoutes     = require('./routes/users')
 const adminFeaturesRoutes = require('./routes/adminFeaturesRoutes')
-const notificationRoutes = require('./routes/notificationRoutes') // ADD THIS
+const notificationRoutes = require('./routes/notificationRoutes')
+const guestDonationRoutes = require('./routes/guestDonationRoutes') // ADD THIS
 
 const { authenticate } = require('./middleware/auth')
 const { errorHandler } = require('./middleware/errorHandler')
@@ -135,6 +136,7 @@ const mkLimiter = (max, windowMs = 15 * 60 * 1000, message = 'Too many requests.
 const relaxedLimiter = mkLimiter(500)
 const authLimiter    = mkLimiter(20,  15 * 60 * 1000, 'Too many auth attempts. Try again later.')
 const notificationLimiter = mkLimiter(10,  60 * 1000, 'Too many notification requests. Please wait.')
+const guestDonationLimiter = mkLimiter(5, 60 * 60 * 1000, 'Too many guest donation requests. Please wait an hour.') // ADD THIS
 
 /* ── Body parsers ───────────────────────────────── */
 app.use('/api/webhooks', express.raw({ type: 'application/json' }))
@@ -300,8 +302,12 @@ app.use('/api/auth',      authLimiter,    authRoutes)
 app.use('/api/donations', relaxedLimiter, donationRoutes)
 app.use('/api/admin',     authenticate,   adminRoutes)
 app.use('/api/admin/features', authenticate, adminFeaturesRoutes)
-app.use('/api/admin/notifications', authenticate, notificationRoutes) // ADD THIS LINE
+app.use('/api/admin/notifications', authenticate, notificationRoutes)
 app.use('/api/wallet',    walletRoutes)
+
+// GUEST DONATION ROUTES (ADD THIS SECTION)
+// Guest routes do NOT require authentication
+app.use('/api/guest-donations', guestDonationLimiter, guestDonationRoutes)
 
 /* ── 404 handler ────────────────────────────────── */
 app.use((req, res) => {
@@ -338,6 +344,7 @@ runMigrations().then(() => {
     console.log(`   Health check : http://localhost:${PORT}/health\n`)
     console.log(`🔐 Emergency admin login available at: /api/admin/emergency-login`)
     console.log(`📱 Push notification routes available at: /api/admin/notifications`)
+    console.log(`👥 GUEST DONATION routes available at: /api/guest-donations`)
   })
 }).catch(err => {
   console.error('Fatal startup error:', err)

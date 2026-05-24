@@ -293,6 +293,96 @@ async function sendWithdrawalStatusEmail({ to, userName, amount, status, adminNo
   })
 }
 
+// ── Guest Donation Emails (NEW) ────────────────────────
+
+async function sendGuestDonationInstructions({ to, guestName, amount, campaignTitle, instructions, donationId }) {
+  const uploadLink = `${process.env.FRONTEND_URL || 'https://hopebridge-inky.vercel.app'}/guest-donation/upload/${donationId}`
+  
+  return await send({
+    to,
+    subject: `Payment Instructions for Your Donation to ${campaignTitle}`,
+    html: htmlWrap(`
+      <h2>Thank You for Your Generosity!</h2>
+      <p>Dear <strong>${guestName || 'Valued Donor'}</strong>,</p>
+      <p>Thank you for your generous donation of <strong>$${parseFloat(amount).toFixed(2)}</strong> to support <strong>${campaignTitle}</strong>.</p>
+      
+      <div class="highlight">
+        <h3 style="margin: 0 0 10px 0;">📋 Payment Instructions</h3>
+        <p style="white-space: pre-line; margin: 0;">${instructions.replace(/\n/g, '<br>')}</p>
+      </div>
+      
+      <div style="background: #E8F5E9; padding: 15px; border-radius: 8px; margin: 20px 0;">
+        <h3 style="margin-top: 0; color: #2D6A4F;">📌 Next Steps</h3>
+        <ol style="margin-left: 20px; line-height: 1.6;">
+          <li>Make the payment using the instructions above</li>
+          <li>Keep your payment confirmation/screenshot</li>
+          <li>Click the link below to upload your payment proof</li>
+        </ol>
+      </div>
+      
+      <p style="text-align: center;">
+        <a href="${uploadLink}" class="btn">Upload Payment Proof</a>
+      </p>
+      
+      <p style="margin-top: 20px; font-size: 12px; color: #666;">
+        Donation Reference: #${donationId}<br>
+        If you have any questions, please contact our support team at support@hopebridge.com
+      </p>
+    `),
+  })
+}
+
+async function sendGuestDonationApproved({ to, guestName, amount, campaignTitle }) {
+  return await send({
+    to,
+    subject: `Your Donation to ${campaignTitle} Has Been Confirmed! ✅`,
+    html: htmlWrap(`
+      <div style="text-align: center; margin-bottom: 20px;">
+        <span style="font-size: 48px;">✅</span>
+      </div>
+      <h2 style="color: #2D6A4F; text-align: center;">Donation Confirmed!</h2>
+      <p>Dear <strong>${guestName || 'Valued Donor'}</strong>,</p>
+      <p>Great news! Your donation of <strong>$${parseFloat(amount).toFixed(2)}</strong> to <strong>${campaignTitle}</strong> has been verified and approved.</p>
+      
+      <div class="highlight" style="text-align: center;">
+        <p style="margin: 0; font-size: 24px; font-weight: bold; color: #2D6A4F;">$${parseFloat(amount).toFixed(2)}</p>
+        <p style="margin: 5px 0 0; color: #666;">Successfully Donated</p>
+      </div>
+      
+      <p>Thank you for making a difference! Your support means the world to us and the cause you've chosen to support.</p>
+      
+      <p>With gratitude,<br>The HopeBridge Team ❤</p>
+    `),
+  })
+}
+
+async function sendGuestDonationRejected({ to, guestName, amount, campaignTitle, reason, donationId }) {
+  return await send({
+    to,
+    subject: `Update Regarding Your Donation to ${campaignTitle}`,
+    html: htmlWrap(`
+      <div style="text-align: center; margin-bottom: 20px;">
+        <span style="font-size: 48px;">⚠️</span>
+      </div>
+      <h2 style="color: #C45B3A; text-align: center;">Donation Payment Not Verified</h2>
+      <p>Dear <strong>${guestName || 'Valued Donor'}</strong>,</p>
+      <p>We were unable to verify your donation of <strong>$${parseFloat(amount).toFixed(2)}</strong> to <strong>${campaignTitle}</strong>.</p>
+      
+      <div class="highlight" style="background: #FDEBD4; border-left-color: #C45B3A;">
+        <h3 style="margin-top: 0; color: #C45B3A;">Reason:</h3>
+        <p>${reason || 'The payment proof provided could not be verified.'}</p>
+      </div>
+      
+      <p>If you believe this is an error, please contact our support team with your payment reference number.</p>
+      
+      <p style="margin-top: 20px; font-size: 12px; color: #666;">
+        Donation Reference: #${donationId}<br>
+        Support Email: support@hopebridge.com
+      </p>
+    `),
+  })
+}
+
 // ── Mass mail ────────────────────────────────────
 async function sendMassEmail({ transporter: t, to, subject, text }) {
   if (!t || !to || to.length === 0) throw new Error('Missing email parameters');
@@ -331,4 +421,8 @@ module.exports = {
   sendWithdrawalRequestAlert,
   sendWithdrawalStatusEmail,
   sendMassEmail,
+  // New guest donation exports
+  sendGuestDonationInstructions,
+  sendGuestDonationApproved,
+  sendGuestDonationRejected,
 }
