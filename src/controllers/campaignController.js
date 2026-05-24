@@ -748,35 +748,35 @@ const adminRefundCampaignEscrow = async (req, res, next) => {
 
 const getCompletionRequests = async (req, res, next) => {
   try {
-    console.log('📋 Fetching completion requests...');
-    
     const result = await pool.query(`
       SELECT 
-        c.id,
-        c.title,
-        c.creator_id,
-        c.completion_requested,
-        c.completion_requested_at,
-        c.status,
-        u.name as creator_name,
-        u.email as creator_email
-      FROM campaigns c
-      JOIN users u ON c.creator_id = u.id
-      WHERE c.completion_requested = TRUE 
-        AND c.status = 'approved'
-      ORDER BY c.completion_requested_at DESC
+        id,
+        title,
+        creator_id,
+        completion_requested,
+        completion_requested_at,
+        status
+      FROM campaigns
+      WHERE completion_requested = true 
+        AND status = 'approved'
+      ORDER BY completion_requested_at DESC
     `);
     
-    console.log(`✅ Found ${result.rows.length} completion requests`);
+    // Get creator names separately if needed
+    const campaignsWithNames = [];
+    for (const campaign of result.rows) {
+      const userRes = await pool.query('SELECT name, email FROM users WHERE id = $1', [campaign.creator_id]);
+      campaignsWithNames.push({
+        ...campaign,
+        creator_name: userRes.rows[0]?.name || 'Unknown',
+        creator_email: userRes.rows[0]?.email || 'Unknown'
+      });
+    }
     
-    res.json({ campaigns: result.rows });
+    res.json({ campaigns: campaignsWithNames });
   } catch (err) {
-    console.error('❌ Error in getCompletionRequests:', err.message);
-    console.error('Error stack:', err.stack);
-    res.status(500).json({ 
-      error: 'Failed to fetch completion requests',
-      details: err.message 
-    });
+    console.error('Error in getCompletionRequests:', err);
+    res.status(500).json({ error: err.message });
   }
 };
 const getRelatedCampaigns = async (req, res, next) => {
