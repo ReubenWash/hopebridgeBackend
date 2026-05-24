@@ -330,24 +330,21 @@ const adjustWalletBalance = async (req, res, next) => {
       return res.status(400).json({ error: 'Valid amount is required' });
     }
 
-    // Validate transaction type - map frontend types to database types
-    const validTypes = ['credit', 'debit', 'deposit', 'withdrawal', 'refund', 'admin_credit', 'admin_debit'];
+    // Map frontend types to internal types
     let transactionType = (type || 'credit').toLowerCase();
     
-    // Map 'add' to 'credit', 'remove' to 'debit' for frontend compatibility
     if (transactionType === 'add') {
       transactionType = 'credit';
     } else if (transactionType === 'remove') {
       transactionType = 'debit';
     }
     
-    if (!validTypes.includes(transactionType)) {
-      return res.status(400).json({ 
-        error: `Invalid transaction type. Must be one of: credit, debit, deposit, withdrawal, refund`,
-        received: transactionType
-      });
-    }
-
+    const isCredit = transactionType === 'credit' || transactionType === 'deposit' || transactionType === 'refund';
+    const isDebit = transactionType === 'debit' || transactionType === 'withdrawal';
+    
+    // Use admin_credit/admin_debit for database (definitely in constraint)
+    const dbType = isCredit ? 'admin_credit' : 'admin_debit';
+    
     await client.query('BEGIN');
 
     // Check if user exists
@@ -362,10 +359,6 @@ const adjustWalletBalance = async (req, res, next) => {
 
     const user = userCheck.rows[0];
     const adjustmentAmount = parseFloat(amount);
-    
-    // Determine if this is a credit or debit based on type
-    const isCredit = transactionType === 'credit' || transactionType === 'deposit' || transactionType === 'refund' || transactionType === 'admin_credit';
-    const isDebit = transactionType === 'debit' || transactionType === 'withdrawal' || transactionType === 'admin_debit';
     
     let finalAmount = adjustmentAmount;
     let balanceChange = adjustmentAmount;
@@ -398,7 +391,7 @@ const adjustWalletBalance = async (req, res, next) => {
       [userId, balanceChange]
     );
 
-    // Record transaction with proper type
+    // Record transaction with dbType (admin_credit or admin_debit)
     const transactionDesc = isCredit
       ? `Admin credit: ${reason || 'Manual adjustment by admin'}`
       : `Admin debit: ${reason || 'Manual adjustment by admin'}`;
@@ -407,8 +400,20 @@ const adjustWalletBalance = async (req, res, next) => {
     
     await client.query(
       `INSERT INTO wallet_transactions (user_id, amount, type, reference, description, status, created_at)
-       VALUES ($1, $2, $3, $4, $5, $6, NOW())`,
-      [userId, finalAmount, transactionType, reference, transactionDesc, 'completed']
+       VALUES ($1, $2, $3, $4, $5, 'completed', NOW())`,
+      [userId, finalAmount, dbType, reference, transactionDesc]
+    );
+
+    // Also update users table wallet_balance
+    const newBalanceResult = await client.query(
+      'SELECT balance FROM wallets WHERE user_id = $1',
+      [userId]
+    );
+    const newBalance = parseFloat(newBalanceResult.rows[0]?.balance || 0);
+    
+    await client.query(
+      'UPDATE users SET wallet_balance = $1 WHERE id = $2',
+      [newBalance, userId]
     );
 
     // Log to audit
@@ -420,13 +425,6 @@ const adjustWalletBalance = async (req, res, next) => {
 
     await client.query('COMMIT');
 
-    // Get new balance
-    const newBalanceResult = await client.query(
-      'SELECT balance FROM wallets WHERE user_id = $1',
-      [userId]
-    );
-    const newBalance = parseFloat(newBalanceResult.rows[0]?.balance || 0);
-
     res.json({
       success: true,
       message: `Wallet ${isCredit ? 'credited' : 'debited'} by $${adjustmentAmount.toFixed(2)} successfully`,
@@ -436,7 +434,7 @@ const adjustWalletBalance = async (req, res, next) => {
       adjustment: isCredit ? adjustmentAmount : -adjustmentAmount,
       previousBalance: currentBalance,
       newBalance: newBalance,
-      transactionType: transactionType,
+      transactionType: dbType,
       reference: reference
     });
   } catch (err) {
