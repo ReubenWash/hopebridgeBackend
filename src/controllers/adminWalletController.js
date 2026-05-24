@@ -1,5 +1,14 @@
 const pool = require('../config/db');
+const path = require('path');
+const fs = require('fs');
 const { sendDepositStatusEmail, sendWithdrawalStatusEmail } = require('../utils/email');
+
+// Ensure uploads directory exists
+const uploadsDir = path.join(__dirname, '../../uploads');
+if (!fs.existsSync(uploadsDir)) {
+  fs.mkdirSync(uploadsDir, { recursive: true });
+  console.log('📁 Created uploads directory for deposit proofs');
+}
 
 // ─────────────────────────────────────────────
 // GET ALL DEPOSIT REQUESTS
@@ -217,7 +226,6 @@ const approveWithdrawal = async (req, res, next) => {
       [wd.amount, wd.user_id]
     );
 
-    // ✅ FIX: Make sure amount is negative for withdrawal
     await client.query(
       `INSERT INTO wallet_transactions (user_id, amount, type, reference, description)
        VALUES ($1, $2, 'withdrawal_out', $3, $4)`,
@@ -301,10 +309,124 @@ const rejectWithdrawal = async (req, res, next) => {
   } catch (err) { next(err); }
 };
 
+// ─────────────────────────────────────────────
+// MANUAL WALLET ADJUSTMENT (Admin)
+// ─────────────────────────────────────────────
+const adjustWalletBalance = async (req, res, next) => {
+  const { userId, amount, reason } = req.body;
+  const client = await pool.connect();
+
+  try {
+    if (!userId || !amount || amount === 0) {
+      return res.status(400).json({ error: 'User ID and non-zero amount are required' });
+    }
+
+    await client.query('BEGIN');
+
+    // Check if user exists
+    const userCheck = await client.query(
+      'SELECT id, name, email FROM users WHERE id = $1',
+      [userId]
+    );
+    if (userCheck.rows.length === 0) {
+      await client.query('ROLLBACK');
+      return res.status(404).json({ error: 'User not found' });
+    }
+
+    const user = userCheck.rows[0];
+    const adjustmentAmount = parseFloat(amount);
+
+    // Update wallet balance
+    await client.query(
+      `INSERT INTO wallets (user_id, balance) VALUES ($1, $2)
+       ON CONFLICT (user_id) DO UPDATE SET balance = wallets.balance + $2`,
+      [userId, adjustmentAmount]
+    );
+
+    // Record transaction
+    const transactionType = adjustmentAmount > 0 ? 'admin_credit' : 'admin_debit';
+    const transactionDesc = adjustmentAmount > 0 
+      ? `Admin credit: ${reason || 'Manual adjustment'}`
+      : `Admin debit: ${reason || 'Manual adjustment'}`;
+
+    await client.query(
+      `INSERT INTO wallet_transactions (user_id, amount, type, reference, description)
+       VALUES ($1, $2, $3, $4, $5)`,
+      [userId, adjustmentAmount, transactionType, `ADMIN-${Date.now()}`, transactionDesc]
+    );
+
+    // Log to audit
+    await client.query(
+      `INSERT INTO audit_logs (admin_id, action, entity_type, entity_id, details, ip_address)
+       VALUES ($1, $2, $3, $4, $5, $6)`,
+      [req.user.id, 'wallet_adjustment', 'wallet', userId, JSON.stringify({ amount, reason, user }), req.ip]
+    );
+
+    await client.query('COMMIT');
+
+    // Get new balance
+    const newBalance = await client.query(
+      'SELECT balance FROM wallets WHERE user_id = $1',
+      [userId]
+    );
+
+    res.json({
+      message: `Wallet adjusted by $${Math.abs(adjustmentAmount).toFixed(2)} (${adjustmentAmount > 0 ? 'credited' : 'debited'})`,
+      userId: user.id,
+      userName: user.name,
+      adjustment: adjustmentAmount,
+      newBalance: parseFloat(newBalance.rows[0]?.balance || 0)
+    });
+  } catch (err) {
+    await client.query('ROLLBACK');
+    next(err);
+  } finally {
+    client.release();
+  }
+};
+
+// ─────────────────────────────────────────────
+// GET USER WALLET DETAILS (Admin)
+// ─────────────────────────────────────────────
+const getUserWalletDetails = async (req, res, next) => {
+  try {
+    const { userId } = req.params;
+
+    const userCheck = await pool.query(
+      'SELECT id, name, email, role FROM users WHERE id = $1',
+      [userId]
+    );
+    if (userCheck.rows.length === 0) {
+      return res.status(404).json({ error: 'User not found' });
+    }
+
+    const wallet = await pool.query(
+      'SELECT balance FROM wallets WHERE user_id = $1',
+      [userId]
+    );
+
+    const transactions = await pool.query(
+      `SELECT * FROM wallet_transactions 
+       WHERE user_id = $1 
+       ORDER BY created_at DESC 
+       LIMIT 50`,
+      [userId]
+    );
+
+    res.json({
+      user: userCheck.rows[0],
+      balance: parseFloat(wallet.rows[0]?.balance || 0),
+      transactions: transactions.rows
+    });
+  } catch (err) { next(err); }
+};
+
 module.exports = {
   getAllDepositRequests,
   updateDepositRequest,
   getAllWithdrawalRequests,
   approveWithdrawal,
   rejectWithdrawal,
+  adjustWalletBalance,
+  getUserWalletDetails,
 };
