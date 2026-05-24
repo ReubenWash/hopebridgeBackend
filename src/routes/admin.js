@@ -40,7 +40,7 @@ const {
   getAllWithdrawalRequests,
   approveWithdrawal,
   rejectWithdrawal,
-  adjustWalletBalance,
+  adjustWalletBalance,  // ← This is the correct one from adminWalletController
   getUserWalletDetails,
 } = require('../controllers/adminWalletController')
 const {
@@ -61,7 +61,7 @@ const {
   updateCampaign,
   updateCampaignProgress,
   updateUser,
-  adjustWallet,
+  // adjustWallet,  // ← REMOVED from adminFeaturesController
 } = require('../controllers/adminFeaturesController')
 
 // NOTE: authenticate runs once in server.js
@@ -136,7 +136,7 @@ router.patch('/users/:id/toggle', toggleUserActive)
 
 // ============ USER MANAGEMENT (NEW) ============
 router.post('/users', addUser)                                    // Add new user
-router.put('/users/:id', updateUser)                              // Edit user (ADD THIS)
+router.put('/users/:id', updateUser)                              // Edit user
 router.delete('/users/:id', deleteUser)                          // Delete user
 router.patch('/users/:id/verify', verifyUser)                    // Verify user
 router.patch('/users/:id/unverify', unverifyUser)                // Unverify user
@@ -181,7 +181,8 @@ router.get('/campaigns/:id', async (req, res, next) => {
 });
 
 // ============ ADMIN WALLET MANAGEMENT ============
-router.post('/wallet/adjust', adjustWallet)                       // Adjust wallet balance (ADD THIS)
+// FIXED: Using adjustWalletBalance from adminWalletController (not adjustWallet from adminFeaturesController)
+router.post('/wallet/adjust', adjustWalletBalance)               // Adjust wallet balance
 router.get('/wallet/user/:userId', getUserWalletDetails)          // Get user wallet details
 
 // Disputes
@@ -259,7 +260,7 @@ router.get('/donor-analytics', getDonorAnalytics)
 // Audit Logs
 router.get('/audit-logs', getAuditLogs)
 
-// ============ NOTIFICATION SETTINGS (ADD THESE) ============
+// ============ NOTIFICATION SETTINGS ============
 router.get('/notification-settings', async (req, res) => {
   try {
     const result = await pool.query(

@@ -549,16 +549,33 @@ const updateUser = async (req, res, next) => {
 
 // ============ ADMIN WALLET ADJUSTMENT (NEW) ============
 
+// ============ ADMIN WALLET ADJUSTMENT (UPDATED) ============
+
 const adjustWallet = async (req, res, next) => {
   const client = await pool.connect();
   try {
     const { userId, amount, type, reason } = req.body;
     
+    console.log('💰 Wallet adjustment request:', { userId, amount, type, reason });
+    
     if (!userId || !amount || amount <= 0) {
       return res.status(400).json({ error: 'Valid user ID and amount required' });
     }
     
-    const adjustmentAmount = type === 'add' ? parseFloat(amount) : -parseFloat(amount);
+    // Map frontend types to adjustment amount
+    // Accept both 'credit'/'debit' and 'add'/'remove' for compatibility
+    let adjustmentAmount;
+    let transactionType;
+    
+    if (type === 'credit' || type === 'add') {
+      adjustmentAmount = parseFloat(amount);
+      transactionType = 'credit';
+    } else if (type === 'debit' || type === 'remove') {
+      adjustmentAmount = -parseFloat(amount);
+      transactionType = 'debit';
+    } else {
+      return res.status(400).json({ error: 'Invalid type. Use: credit, debit, add, or remove' });
+    }
     
     await client.query('BEGIN');
     
@@ -568,33 +585,65 @@ const adjustWallet = async (req, res, next) => {
       return res.status(404).json({ error: 'User not found' });
     }
     
+    // Check current balance for debits
+    if (adjustmentAmount < 0) {
+      const walletCheck = await client.query('SELECT balance FROM wallets WHERE user_id = $1', [userId]);
+      const currentBalance = parseFloat(walletCheck.rows[0]?.balance || 0);
+      if (currentBalance + adjustmentAmount < 0) {
+        await client.query('ROLLBACK');
+        return res.status(400).json({ 
+          error: 'Insufficient balance', 
+          currentBalance, 
+          requestedAmount: Math.abs(adjustmentAmount) 
+        });
+      }
+    }
+    
+    // Update wallet balance
     await client.query(
       `INSERT INTO wallets (user_id, balance) VALUES ($1, $2)
-       ON CONFLICT (user_id) DO UPDATE SET balance = wallets.balance + $2`,
+       ON CONFLICT (user_id) DO UPDATE SET balance = wallets.balance + $2, updated_at = NOW()`,
       [userId, adjustmentAmount]
     );
     
+    // Record transaction
+    const reference = `ADMIN-${Date.now()}-${Math.random().toString(36).substr(2, 6)}`;
+    const transactionDesc = reason || `Manual ${transactionType} by admin`;
+    
     await client.query(
-      `INSERT INTO wallet_transactions (user_id, amount, type, reference, description)
-       VALUES ($1, $2, 'admin_adjustment', $3, $4)`,
-      [userId, adjustmentAmount, `ADMIN-${Date.now()}`, reason || `Manual ${type === 'add' ? 'credit' : 'debit'} by admin`]
+      `INSERT INTO wallet_transactions (user_id, amount, type, reference, description, status, created_at)
+       VALUES ($1, $2, $3, $4, $5, 'completed', NOW())`,
+      [userId, adjustmentAmount, transactionType, reference, transactionDesc]
     );
     
-    await client.query(`
-      INSERT INTO audit_logs (admin_id, action, entity_type, entity_id, details, ip_address)
-      VALUES ($1, $2, $3, $4, $5, $6)
-    `, [req.user.id, 'wallet_adjustment', 'wallet', userId, JSON.stringify({ amount, type, reason, user: userCheck.rows[0] }), req.ip]);
+    // Also update users table wallet_balance for consistency
+    const newBalanceResult = await client.query('SELECT balance FROM wallets WHERE user_id = $1', [userId]);
+    const newBalance = parseFloat(newBalanceResult.rows[0]?.balance || 0);
     
-    const newBalance = await client.query('SELECT balance FROM wallets WHERE user_id = $1', [userId]);
+    await client.query(
+      'UPDATE users SET wallet_balance = $1 WHERE id = $2',
+      [newBalance, userId]
+    );
+    
+    // Log to audit
+    await client.query(`
+      INSERT INTO audit_logs (admin_id, action, entity_type, entity_id, details, ip_address, created_at)
+      VALUES ($1, $2, $3, $4, $5, $6, NOW())
+    `, [req.user.id, 'wallet_adjustment', 'wallet', userId, JSON.stringify({ amount, type: transactionType, reason, user: userCheck.rows[0] }), req.ip]);
     
     await client.query('COMMIT');
     
     res.json({ 
-      message: `Wallet ${type === 'add' ? 'credited' : 'debited'} by $${Math.abs(adjustmentAmount)}`,
-      newBalance: parseFloat(newBalance.rows[0]?.balance || 0)
+      success: true,
+      message: `Wallet ${adjustmentAmount > 0 ? 'credited' : 'debited'} by $${Math.abs(adjustmentAmount).toFixed(2)}`,
+      adjustment: adjustmentAmount,
+      newBalance: newBalance,
+      transactionType: transactionType,
+      reference: reference
     });
   } catch (err) {
     await client.query('ROLLBACK');
+    console.error('Wallet adjustment error:', err);
     next(err);
   } finally {
     client.release();
