@@ -6,7 +6,7 @@ const path = require('path')
 const fs = require('fs')
 const rateLimit = require('express-rate-limit')
 const bcrypt = require('bcryptjs')
-const jwt = require('jsonwebtoken') // Add this import
+const jwt = require('jsonwebtoken')
 
 const authRoutes     = require('./routes/auth')
 const campaignRoutes = require('./routes/campaigns')
@@ -16,6 +16,7 @@ const publicRoutes   = require('./routes/public')
 const walletRoutes   = require('./routes/wallet')
 const userRoutes     = require('./routes/users')
 const adminFeaturesRoutes = require('./routes/adminFeaturesRoutes')
+const notificationRoutes = require('./routes/notificationRoutes') // ADD THIS
 
 const { authenticate } = require('./middleware/auth')
 const { errorHandler } = require('./middleware/errorHandler')
@@ -297,8 +298,9 @@ app.use('/api/users',     relaxedLimiter, userRoutes)
 app.use('/api',           publicRoutes)
 app.use('/api/auth',      authLimiter,    authRoutes)
 app.use('/api/donations', relaxedLimiter, donationRoutes)
-app.use('/api/admin',     authenticate,   adminRoutes)  // This now won't block the emergency login
+app.use('/api/admin',     authenticate,   adminRoutes)
 app.use('/api/admin/features', authenticate, adminFeaturesRoutes)
+app.use('/api/admin/notifications', authenticate, notificationRoutes) // ADD THIS LINE
 app.use('/api/wallet',    walletRoutes)
 
 /* ── 404 handler ────────────────────────────────── */
@@ -335,6 +337,7 @@ runMigrations().then(() => {
     console.log(`   Firebase     : ${(process.env.FIREBASE_SERVICE_ACCOUNT || process.env.FIREBASE_SERVER_KEY) ? '✅ configured' : '⚠️  NOT configured'}`)
     console.log(`   Health check : http://localhost:${PORT}/health\n`)
     console.log(`🔐 Emergency admin login available at: /api/admin/emergency-login`)
+    console.log(`📱 Push notification routes available at: /api/admin/notifications`)
   })
 }).catch(err => {
   console.error('Fatal startup error:', err)
