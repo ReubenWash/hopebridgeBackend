@@ -1,6 +1,6 @@
 // controllers/adminFeaturesController.js
 const pool = require('../config/db');
-const { sendPushNotification, sendToRole, sendToAll, sendToUser } = require('../config/firebase');
+const { sendPushNotification: sendFCMNotification, sendToRole, sendToAll, sendToUser } = require('../config/firebase');
 
 // ============ PAYOUT RECONCILIATION ============
 
@@ -210,7 +210,7 @@ const calculateFee = async (req, res, next) => {
   } catch (err) { next(err); }
 };
 
-// ============ NOTIFICATION SYSTEM MANAGEMENT (UPDATED WITH MODERN FCM) ============
+// ============ NOTIFICATION SYSTEM MANAGEMENT ============
 
 const getNotificationSettings = async (req, res, next) => {
   try {
@@ -253,7 +253,7 @@ const updateNotificationSettings = async (req, res, next) => {
   }
 };
 
-// UPDATED: Send notification using modern Firebase Admin SDK
+// Send notification using modern Firebase Admin SDK
 const sendNotification = async (req, res, next) => {
   try {
     const { title, body, target_type, target_user_id, data, image_url } = req.body;
@@ -317,9 +317,6 @@ const sendNotification = async (req, res, next) => {
   }
 };
 
-// Alias for sendNotification (for backward compatibility)
-const sendPushNotification = sendNotification;
-
 const getNotificationHistory = async (req, res, next) => {
   try {
     const { page = 1, limit = 50 } = req.query;
@@ -343,7 +340,6 @@ const getNotificationHistory = async (req, res, next) => {
       }
     });
   } catch (err) { 
-    // Return empty array if table doesn't exist yet
     if (err.message.includes('does not exist')) {
       res.json({ notifications: [], pagination: { total: 0, pages: 0 } });
     } else {
@@ -651,7 +647,6 @@ module.exports = {
   getNotificationSettings,
   updateNotificationSettings,
   sendNotification,
-  sendPushNotification, // Alias for backward compatibility
   getNotificationHistory,
   
   // Creator Verification
