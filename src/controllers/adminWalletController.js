@@ -108,16 +108,18 @@ const updateDepositRequest = async (req, res, next) => {
       );
       
       if (existingCredit.rows.length === 0) {
+        // Update wallet balance
         await client.query(
           `INSERT INTO wallets (user_id, balance) VALUES ($1, $2)
            ON CONFLICT (user_id) DO UPDATE SET balance = wallets.balance + $2`,
           [existing.user_id, existing.amount]
         );
 
+        // Record transaction with proper type
         await client.query(
-          `INSERT INTO wallet_transactions (user_id, amount, type, reference, description)
-           VALUES ($1, $2, 'deposit', $3, $4)`,
-          [existing.user_id, existing.amount, `DEP-${id}`, `Deposit request #${id} approved`]
+          `INSERT INTO wallet_transactions (user_id, amount, type, reference, description, status)
+           VALUES ($1, $2, $3, $4, $5, $6)`,
+          [existing.user_id, existing.amount, 'deposit', `DEP-${id}`, `Deposit request #${id} approved`, 'completed']
         );
       }
     }
@@ -226,10 +228,11 @@ const approveWithdrawal = async (req, res, next) => {
       [wd.amount, wd.user_id]
     );
 
+    // Record transaction with proper type (using 'debit' or 'withdrawal')
     await client.query(
-      `INSERT INTO wallet_transactions (user_id, amount, type, reference, description)
-       VALUES ($1, $2, 'withdrawal_out', $3, $4)`,
-      [wd.user_id, -Math.abs(wd.amount), `WD-${id}`, `Withdrawal approved (ID: ${id})`]
+      `INSERT INTO wallet_transactions (user_id, amount, type, reference, description, status)
+       VALUES ($1, $2, $3, $4, $5, $6)`,
+      [wd.user_id, -Math.abs(wd.amount), 'withdrawal', `WD-${id}`, `Withdrawal approved (ID: ${id})`, 'completed']
     );
 
     await client.query(
@@ -311,21 +314,45 @@ const rejectWithdrawal = async (req, res, next) => {
 
 // ─────────────────────────────────────────────
 // MANUAL WALLET ADJUSTMENT (Admin)
+// FIXED: Now accepts 'type' parameter (credit/debit) from frontend
 // ─────────────────────────────────────────────
 const adjustWalletBalance = async (req, res, next) => {
-  const { userId, amount, reason } = req.body;
+  const { userId, amount, type, reason } = req.body;
   const client = await pool.connect();
 
   try {
-    if (!userId || !amount || amount === 0) {
-      return res.status(400).json({ error: 'User ID and non-zero amount are required' });
+    // Validate required fields
+    if (!userId) {
+      return res.status(400).json({ error: 'User ID is required' });
+    }
+    
+    if (!amount || parseFloat(amount) <= 0) {
+      return res.status(400).json({ error: 'Valid amount is required' });
+    }
+
+    // Validate transaction type - map frontend types to database types
+    const validTypes = ['credit', 'debit', 'deposit', 'withdrawal', 'refund', 'admin_credit', 'admin_debit'];
+    let transactionType = (type || 'credit').toLowerCase();
+    
+    // Map 'add' to 'credit', 'remove' to 'debit' for frontend compatibility
+    if (transactionType === 'add') {
+      transactionType = 'credit';
+    } else if (transactionType === 'remove') {
+      transactionType = 'debit';
+    }
+    
+    if (!validTypes.includes(transactionType)) {
+      return res.status(400).json({ 
+        error: `Invalid transaction type. Must be one of: credit, debit, deposit, withdrawal, refund`,
+        received: transactionType
+      });
     }
 
     await client.query('BEGIN');
 
     // Check if user exists
     const userCheck = await client.query(
-      'SELECT id, name, email FROM users WHERE id = $1',
+      'SELECT id, name, email, role FROM users WHERE id = $1',
       [userId]
     );
     if (userCheck.rows.length === 0) {
@@ -335,50 +362,86 @@ const adjustWalletBalance = async (req, res, next) => {
 
     const user = userCheck.rows[0];
     const adjustmentAmount = parseFloat(amount);
+    
+    // Determine if this is a credit or debit based on type
+    const isCredit = transactionType === 'credit' || transactionType === 'deposit' || transactionType === 'refund' || transactionType === 'admin_credit';
+    const isDebit = transactionType === 'debit' || transactionType === 'withdrawal' || transactionType === 'admin_debit';
+    
+    let finalAmount = adjustmentAmount;
+    let balanceChange = adjustmentAmount;
+    
+    if (isDebit) {
+      balanceChange = -adjustmentAmount;
+      finalAmount = -adjustmentAmount;
+    }
+
+    // Get current wallet balance for validation
+    const walletCheck = await client.query(
+      'SELECT balance FROM wallets WHERE user_id = $1',
+      [userId]
+    );
+    const currentBalance = parseFloat(walletCheck.rows[0]?.balance || 0);
+    
+    if (isDebit && currentBalance < adjustmentAmount) {
+      await client.query('ROLLBACK');
+      return res.status(400).json({ 
+        error: 'Insufficient balance',
+        currentBalance,
+        requestedAmount: adjustmentAmount
+      });
+    }
 
     // Update wallet balance
     await client.query(
       `INSERT INTO wallets (user_id, balance) VALUES ($1, $2)
-       ON CONFLICT (user_id) DO UPDATE SET balance = wallets.balance + $2`,
-      [userId, adjustmentAmount]
+       ON CONFLICT (user_id) DO UPDATE SET balance = wallets.balance + $2, updated_at = NOW()`,
+      [userId, balanceChange]
     );
 
-    // Record transaction
-    const transactionType = adjustmentAmount > 0 ? 'admin_credit' : 'admin_debit';
-    const transactionDesc = adjustmentAmount > 0 
-      ? `Admin credit: ${reason || 'Manual adjustment'}`
-      : `Admin debit: ${reason || 'Manual adjustment'}`;
+    // Record transaction with proper type
+    const transactionDesc = isCredit
+      ? `Admin credit: ${reason || 'Manual adjustment by admin'}`
+      : `Admin debit: ${reason || 'Manual adjustment by admin'}`;
 
+    const reference = `ADMIN-${Date.now()}-${Math.random().toString(36).substr(2, 6)}`;
+    
     await client.query(
-      `INSERT INTO wallet_transactions (user_id, amount, type, reference, description)
-       VALUES ($1, $2, $3, $4, $5)`,
-      [userId, adjustmentAmount, transactionType, `ADMIN-${Date.now()}`, transactionDesc]
+      `INSERT INTO wallet_transactions (user_id, amount, type, reference, description, status, created_at)
+       VALUES ($1, $2, $3, $4, $5, $6, NOW())`,
+      [userId, finalAmount, transactionType, reference, transactionDesc, 'completed']
     );
 
     // Log to audit
     await client.query(
-      `INSERT INTO audit_logs (admin_id, action, entity_type, entity_id, details, ip_address)
-       VALUES ($1, $2, $3, $4, $5, $6)`,
-      [req.user.id, 'wallet_adjustment', 'wallet', userId, JSON.stringify({ amount, reason, user }), req.ip]
+      `INSERT INTO audit_logs (admin_id, action, entity_type, entity_id, details, ip_address, created_at)
+       VALUES ($1, $2, $3, $4, $5, $6, NOW())`,
+      [req.user.id, 'wallet_adjustment', 'wallet', userId, JSON.stringify({ amount, type: transactionType, reason, user: { id: user.id, name: user.name } }), req.ip || 'unknown']
     );
 
     await client.query('COMMIT');
 
     // Get new balance
-    const newBalance = await client.query(
+    const newBalanceResult = await client.query(
       'SELECT balance FROM wallets WHERE user_id = $1',
       [userId]
     );
+    const newBalance = parseFloat(newBalanceResult.rows[0]?.balance || 0);
 
     res.json({
-      message: `Wallet adjusted by $${Math.abs(adjustmentAmount).toFixed(2)} (${adjustmentAmount > 0 ? 'credited' : 'debited'})`,
+      success: true,
+      message: `Wallet ${isCredit ? 'credited' : 'debited'} by $${adjustmentAmount.toFixed(2)} successfully`,
       userId: user.id,
       userName: user.name,
-      adjustment: adjustmentAmount,
-      newBalance: parseFloat(newBalance.rows[0]?.balance || 0)
+      userEmail: user.email,
+      adjustment: isCredit ? adjustmentAmount : -adjustmentAmount,
+      previousBalance: currentBalance,
+      newBalance: newBalance,
+      transactionType: transactionType,
+      reference: reference
     });
   } catch (err) {
     await client.query('ROLLBACK');
+    console.error('Wallet adjustment error:', err);
     next(err);
   } finally {
     client.release();
@@ -401,7 +464,7 @@ const getUserWalletDetails = async (req, res, next) => {
     }
 
     const wallet = await pool.query(
-      'SELECT balance FROM wallets WHERE user_id = $1',
+      'SELECT balance, updated_at FROM wallets WHERE user_id = $1',
       [userId]
     );
 
@@ -413,12 +476,54 @@ const getUserWalletDetails = async (req, res, next) => {
       [userId]
     );
 
+    // Calculate total donated and withdrawn
+    const totals = await pool.query(
+      `SELECT 
+        SUM(CASE WHEN type IN ('donation', 'deposit', 'credit', 'admin_credit') THEN ABS(amount) ELSE 0 END) as total_in,
+        SUM(CASE WHEN type IN ('withdrawal', 'debit', 'admin_debit') THEN ABS(amount) ELSE 0 END) as total_out
+       FROM wallet_transactions 
+       WHERE user_id = $1 AND status = 'completed'`,
+      [userId]
+    );
+
     res.json({
       user: userCheck.rows[0],
       balance: parseFloat(wallet.rows[0]?.balance || 0),
+      lastUpdated: wallet.rows[0]?.updated_at || null,
+      totalDonated: parseFloat(totals.rows[0]?.total_in || 0),
+      totalWithdrawn: parseFloat(totals.rows[0]?.total_out || 0),
       transactions: transactions.rows
     });
-  } catch (err) { next(err); }
+  } catch (err) { 
+    console.error('Get user wallet details error:', err);
+    next(err); 
+  }
+};
+
+// ─────────────────────────────────────────────
+// GET WALLET TRANSACTION SUMMARY (Admin)
+// ─────────────────────────────────────────────
+const getWalletSummary = async (req, res, next) => {
+  try {
+    const result = await pool.query(`
+      SELECT 
+        COUNT(DISTINCT w.user_id) as active_wallets,
+        SUM(w.balance) as total_balance,
+        SUM(CASE WHEN wt.type IN ('donation', 'deposit', 'credit') THEN ABS(wt.amount) ELSE 0 END) as total_deposits,
+        SUM(CASE WHEN wt.type IN ('withdrawal', 'debit') THEN ABS(wt.amount) ELSE 0 END) as total_withdrawals
+      FROM wallets w
+      LEFT JOIN wallet_transactions wt ON w.user_id = wt.user_id AND wt.status = 'completed'
+    `);
+    
+    res.json(result.rows[0] || {
+      active_wallets: 0,
+      total_balance: 0,
+      total_deposits: 0,
+      total_withdrawals: 0
+    });
+  } catch (err) {
+    next(err);
+  }
 };
 
 module.exports = {
@@ -429,4 +534,5 @@ module.exports = {
   rejectWithdrawal,
   adjustWalletBalance,
   getUserWalletDetails,
+  getWalletSummary,
 };

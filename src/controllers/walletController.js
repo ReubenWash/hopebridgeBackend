@@ -22,10 +22,14 @@ const getBalance = async (req, res, next) => {
         'INSERT INTO wallets (user_id, balance) VALUES ($1, 0) ON CONFLICT (user_id) DO NOTHING',
         [req.user.id]
       );
-      return res.json({ balance: 0 });
+      return res.json({ balance: 0, currency: 'USD' });
     }
 
-    res.json({ balance: parseFloat(result.rows[0].balance) });
+    res.json({ 
+      balance: parseFloat(result.rows[0].balance),
+      currency: 'USD',
+      formatted: `$${parseFloat(result.rows[0].balance).toFixed(2)}`
+    });
   } catch (err) { next(err); }
 };
 
@@ -34,14 +38,37 @@ const getBalance = async (req, res, next) => {
 // ─────────────────────────────────────────────
 const getTransactions = async (req, res, next) => {
   try {
-    const result = await pool.query(
-      `SELECT * FROM wallet_transactions
-       WHERE user_id = $1
-       ORDER BY created_at DESC
-       LIMIT 100`,
-      [req.user.id]
-    );
-    res.json({ transactions: result.rows });
+    const { limit = 100, offset = 0, type } = req.query;
+    
+    let query = `
+      SELECT * FROM wallet_transactions
+      WHERE user_id = $1
+    `;
+    const params = [req.user.id];
+    
+    if (type) {
+      query += ` AND type = $2`;
+      params.push(type);
+    }
+    
+    query += ` ORDER BY created_at DESC LIMIT $${params.length + 1} OFFSET $${params.length + 2}`;
+    params.push(parseInt(limit), parseInt(offset));
+    
+    const result = await pool.query(query, params);
+    
+    // Get total count
+    const countQuery = type 
+      ? `SELECT COUNT(*) FROM wallet_transactions WHERE user_id = $1 AND type = $2`
+      : `SELECT COUNT(*) FROM wallet_transactions WHERE user_id = $1`;
+    const countParams = type ? [req.user.id, type] : [req.user.id];
+    const countResult = await pool.query(countQuery, countParams);
+    
+    res.json({ 
+      transactions: result.rows,
+      total: parseInt(countResult.rows[0].count),
+      limit: parseInt(limit),
+      offset: parseInt(offset)
+    });
   } catch (err) { next(err); }
 };
 
@@ -58,7 +85,7 @@ const requestDeposit = async (req, res, next) => {
 
     // Check for pending requests to avoid spam
     const pending = await pool.query(
-      `SELECT id FROM deposit_requests WHERE user_id = $1 AND status IN ('pending','instructions_sent') LIMIT 1`,
+      `SELECT id FROM deposit_requests WHERE user_id = $1 AND status IN ('pending','instructions_sent','awaiting_proof') LIMIT 1`,
       [req.user.id]
     );
     if (pending.rows.length > 0) {
@@ -127,7 +154,7 @@ const uploadProof = async (req, res, next) => {
 
     const result = await pool.query(
       `UPDATE deposit_requests
-       SET proof_image_url = $1, status = 'awaiting_proof'
+       SET proof_image_url = $1, status = 'awaiting_proof', updated_at = NOW()
        WHERE id = $2 AND user_id = $3 AND status IN ('pending','instructions_sent')
        RETURNING *`,
       [proofImageUrl, requestId, req.user.id]
@@ -241,31 +268,31 @@ const donateFromWallet = async (req, res, next) => {
 
     const donationRow = donation.rows[0];
 
-    // Wallet transaction ledger entry (donation_out)
+    // Wallet transaction ledger entry (using 'donation' type instead of 'donation_out')
     await client.query(
       `INSERT INTO wallet_transactions
-       (user_id, amount, type, reference_id, description)
-       VALUES ($1, $2, 'donation_out', $3, $4)`,
+       (user_id, amount, type, reference_id, description, status, created_at)
+       VALUES ($1, $2, $3, $4, $5, $6, NOW())`,
       [
         req.user.id,
         -donationAmount,  // negative because money leaves wallet
+        'donation',
         donationRow.id,
         `Donation to "${campRes.rows[0].title}" (held in escrow)`,
+        'completed'
       ]
     );
 
-    // Create escrow hold record (note: column is donor_id, not user_id)
+    // Create escrow hold record
     await client.query(
       `INSERT INTO escrow_holds (donor_id, campaign_id, donation_id, amount, status, held_at)
        VALUES ($1, $2, $3, $4, 'held', NOW())`,
       [req.user.id, campaign_id, donationRow.id, donationAmount]
     );
 
-    // DO NOT update campaign raised yet – that happens only when escrow is released
-
     await client.query('COMMIT');
 
-    // Send admin alert (optional)
+    // Send admin alert
     const adminRes = await pool.query("SELECT email FROM users WHERE role = 'admin' LIMIT 1");
     if (adminRes.rows.length > 0) {
       sendNewDonationAdminAlert({
@@ -312,7 +339,10 @@ const requestWithdrawal = async (req, res, next) => {
       [req.user.id]
     );
 
-    if (wallet.rows.length === 0) throw new Error('Wallet not found');
+    if (wallet.rows.length === 0) {
+      await client.query('ROLLBACK');
+      return res.status(404).json({ error: 'Wallet not found' });
+    }
 
     const balance = parseFloat(wallet.rows[0].balance);
     if (withdrawAmount > balance) {
@@ -324,8 +354,8 @@ const requestWithdrawal = async (req, res, next) => {
 
     const result = await client.query(
       `INSERT INTO withdrawal_requests
-       (user_id, amount, payment_method, payment_details)
-       VALUES ($1, $2, $3, $4)
+       (user_id, amount, payment_method, payment_details, status)
+       VALUES ($1, $2, $3, $4, 'pending')
        RETURNING *`,
       [req.user.id, withdrawAmount, payment_method, payment_details || '']
     );
@@ -412,15 +442,15 @@ const releaseEscrow = async (req, res, next) => {
     // Credit creator wallet
     await client.query(
       `INSERT INTO wallets (user_id, balance) VALUES ($1, $2)
-       ON CONFLICT (user_id) DO UPDATE SET balance = wallets.balance + $2`,
+       ON CONFLICT (user_id) DO UPDATE SET balance = wallets.balance + $2, updated_at = NOW()`,
       [creatorId, hold.amount]
     );
 
-    // Record transaction for creator
+    // Record transaction for creator (using 'credit' type)
     await client.query(
-      `INSERT INTO wallet_transactions (user_id, amount, type, reference_id, description)
-       VALUES ($1, $2, 'escrow_release', $3, $4)`,
-      [creatorId, hold.amount, hold.id, `Escrow release for "${campRes.rows[0].title}"`]
+      `INSERT INTO wallet_transactions (user_id, amount, type, reference_id, description, status, created_at)
+       VALUES ($1, $2, $3, $4, $5, $6, NOW())`,
+      [creatorId, hold.amount, 'credit', hold.id, `Escrow release for "${campRes.rows[0].title}"`, 'completed']
     );
 
     // Update escrow status
@@ -437,13 +467,18 @@ const releaseEscrow = async (req, res, next) => {
 
     // Update campaign raised amount (add released amount)
     await client.query(
-      `UPDATE campaigns SET raised = raised + $1 WHERE id = $2`,
+      `UPDATE campaigns SET raised = raised + $1, updated_at = NOW() WHERE id = $2`,
       [hold.amount, hold.campaign_id]
     );
 
     await client.query('COMMIT');
 
-    res.json({ message: 'Escrow released to campaign creator', amount: hold.amount });
+    res.json({ 
+      success: true,
+      message: 'Escrow released to campaign creator', 
+      amount: hold.amount,
+      campaign: campRes.rows[0].title
+    });
   } catch (err) {
     await client.query('ROLLBACK');
     next(err);
@@ -477,15 +512,15 @@ const refundEscrow = async (req, res, next) => {
     // Refund to donor wallet (donor_id is the user_id)
     await client.query(
       `INSERT INTO wallets (user_id, balance) VALUES ($1, $2)
-       ON CONFLICT (user_id) DO UPDATE SET balance = wallets.balance + $2`,
+       ON CONFLICT (user_id) DO UPDATE SET balance = wallets.balance + $2, updated_at = NOW()`,
       [hold.donor_id, hold.amount]
     );
 
-    // Record transaction for donor
+    // Record transaction for donor (using 'refund' type)
     await client.query(
-      `INSERT INTO wallet_transactions (user_id, amount, type, reference_id, description)
-       VALUES ($1, $2, 'escrow_refund', $3, $4)`,
-      [hold.donor_id, hold.amount, hold.id, 'Escrow refund due to campaign cancellation']
+      `INSERT INTO wallet_transactions (user_id, amount, type, reference_id, description, status, created_at)
+       VALUES ($1, $2, $3, $4, $5, $6, NOW())`,
+      [hold.donor_id, hold.amount, 'refund', hold.id, 'Escrow refund due to campaign cancellation', 'completed']
     );
 
     // Update escrow status
@@ -502,7 +537,11 @@ const refundEscrow = async (req, res, next) => {
 
     await client.query('COMMIT');
 
-    res.json({ message: 'Escrow refunded to donor wallet', amount: hold.amount });
+    res.json({ 
+      success: true,
+      message: 'Escrow refunded to donor wallet', 
+      amount: hold.amount
+    });
   } catch (err) {
     await client.query('ROLLBACK');
     next(err);
@@ -519,26 +558,47 @@ const getWalletSummary = async (req, res, next) => {
     const [balRes, txRes, depRes, wdRes] = await Promise.all([
       pool.query('SELECT balance FROM wallets WHERE user_id = $1', [req.user.id]),
       pool.query(
-        'SELECT * FROM wallet_transactions WHERE user_id = $1 ORDER BY created_at DESC LIMIT 20',
+        `SELECT * FROM wallet_transactions 
+         WHERE user_id = $1 
+         ORDER BY created_at DESC 
+         LIMIT 20`,
         [req.user.id]
       ),
       pool.query(
-        'SELECT * FROM deposit_requests WHERE user_id = $1 ORDER BY created_at DESC LIMIT 5',
+        `SELECT * FROM deposit_requests 
+         WHERE user_id = $1 
+         ORDER BY created_at DESC 
+         LIMIT 5`,
         [req.user.id]
       ),
       pool.query(
-        'SELECT * FROM withdrawal_requests WHERE user_id = $1 ORDER BY created_at DESC LIMIT 5',
+        `SELECT * FROM withdrawal_requests 
+         WHERE user_id = $1 
+         ORDER BY created_at DESC 
+         LIMIT 5`,
         [req.user.id]
       ),
     ]);
 
+    // Calculate total donated
+    const donatedRes = await pool.query(
+      `SELECT COALESCE(SUM(ABS(amount)), 0) as total_donated
+       FROM wallet_transactions 
+       WHERE user_id = $1 AND type IN ('donation', 'donation_out') AND status = 'completed'`,
+      [req.user.id]
+    );
+
     res.json({
       balance: parseFloat(balRes.rows[0]?.balance || 0),
+      totalDonated: parseFloat(donatedRes.rows[0]?.total_donated || 0),
       transactions: txRes.rows,
       depositRequests: depRes.rows,
       withdrawals: wdRes.rows,
     });
-  } catch (err) { next(err); }
+  } catch (err) { 
+    console.error('Wallet summary error:', err);
+    next(err); 
+  }
 };
 
 module.exports = {
