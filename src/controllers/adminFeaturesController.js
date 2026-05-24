@@ -1,6 +1,7 @@
 // controllers/adminFeaturesController.js
 const pool = require('../config/db');
 const { sendPushNotification: sendFCMNotification, sendToRole, sendToAll, sendToUser } = require('../config/firebase');
+const { uploadToImageKit, deleteFromImageKit } = require('../config/imagekit');
 
 // ============ PAYOUT RECONCILIATION ============
 
@@ -153,7 +154,9 @@ const getFeeSettings = async (req, res, next) => {
         min_fee: 0,
         max_fee: null,
         withdrawal_fee: 0,
-        minimum_withdrawal: 10
+        minimum_withdrawal: 10,
+        minimum_deposit: 1,
+        maximum_deposit: null
       });
     }
     
@@ -162,17 +165,27 @@ const getFeeSettings = async (req, res, next) => {
 };
 
 const updateFeeSettings = async (req, res, next) => {
-  const { percentage, fixed_amount, min_fee, max_fee, withdrawal_fee, minimum_withdrawal } = req.body;
+  const { percentage, fixed_amount, min_fee, max_fee, withdrawal_fee, minimum_withdrawal, minimum_deposit, maximum_deposit } = req.body;
   const client = await pool.connect();
   
   try {
     await client.query('BEGIN');
     
     const result = await client.query(`
-      INSERT INTO platform_fees (percentage, fixed_amount, min_fee, max_fee, withdrawal_fee, minimum_withdrawal, updated_by)
-      VALUES ($1, $2, $3, $4, $5, $6, $7)
+      INSERT INTO platform_fees (percentage, fixed_amount, min_fee, max_fee, withdrawal_fee, minimum_withdrawal, minimum_deposit, maximum_deposit, updated_by)
+      VALUES ($1, $2, $3, $4, $5, $6, $7, $8, $9)
       RETURNING *
-    `, [percentage || 0, fixed_amount || 0, min_fee || 0, max_fee || null, withdrawal_fee || 0, minimum_withdrawal || 10, req.user.id]);
+    `, [
+      percentage || 0, 
+      fixed_amount || 0, 
+      min_fee || 0, 
+      max_fee || null, 
+      withdrawal_fee || 0, 
+      minimum_withdrawal || 10,
+      minimum_deposit || 1,
+      maximum_deposit || null,
+      req.user.id
+    ]);
     
     await client.query(`
       INSERT INTO audit_logs (admin_id, action, entity_type, details, ip_address)
@@ -262,7 +275,6 @@ const sendNotification = async (req, res, next) => {
       return res.status(400).json({ error: 'Title and body are required' });
     }
     
-    // Get notification settings
     const settings = await pool.query(
       "SELECT value FROM settings WHERE key = 'push_notifications_enabled'"
     );
@@ -275,7 +287,6 @@ const sendNotification = async (req, res, next) => {
     const notification = { title, body, imageUrl: image_url };
     let result;
     
-    // Use the modern Firebase Admin SDK functions
     switch (target_type) {
       case 'all':
         result = await sendToAll(notification, data || {});
@@ -299,7 +310,6 @@ const sendNotification = async (req, res, next) => {
         return res.status(400).json({ error: 'Invalid target_type. Use: all, donors, creators, admins, specific_user' });
     }
     
-    // Log notification to database
     await pool.query(
       `INSERT INTO push_notifications (title, body, target_type, target_user_id, sent_count, delivered_count)
        VALUES ($1, $2, $3, $4, $5, $6)`,
@@ -345,6 +355,249 @@ const getNotificationHistory = async (req, res, next) => {
     } else {
       next(err);
     }
+  }
+};
+
+// ============ ADMIN CAMPAIGN MANAGEMENT (NEW) ============
+
+const createCampaign = async (req, res, next) => {
+  try {
+    const { title, description, goal, category, creator_name } = req.body;
+    
+    if (!title || !goal) {
+      return res.status(400).json({ error: 'Title and goal are required' });
+    }
+    
+    let creatorId = req.user.id;
+    if (creator_name) {
+      const creatorResult = await pool.query(
+        "SELECT id FROM users WHERE name ILIKE $1 OR email ILIKE $1 AND role = 'creator' LIMIT 1",
+        [`%${creator_name}%`]
+      );
+      if (creatorResult.rows.length > 0) {
+        creatorId = creatorResult.rows[0].id;
+      }
+    }
+    
+    let image_url = null;
+    let image_file_id = null;
+    
+    if (req.file) {
+      try {
+        const uploadResult = await uploadToImageKit(req.file.buffer, `${Date.now()}-campaign.jpg`, 'hopebridge/campaigns');
+        if (uploadResult.url) {
+          image_url = uploadResult.url;
+          image_file_id = uploadResult.fileId;
+        }
+      } catch (err) {
+        console.warn('Image upload failed:', err.message);
+      }
+    }
+    
+    const result = await pool.query(
+      `INSERT INTO campaigns (creator_id, title, description, goal, image_url, image_file_id, category, status)
+       VALUES ($1, $2, $3, $4, $5, $6, $7, 'approved')
+       RETURNING *`,
+      [creatorId, title.trim(), description?.trim() || null, parseFloat(goal), image_url, image_file_id, category || 'General']
+    );
+    
+    await pool.query(`
+      INSERT INTO audit_logs (admin_id, action, entity_type, entity_id, details, ip_address)
+      VALUES ($1, $2, $3, $4, $5, $6)
+    `, [req.user.id, 'admin_campaign_created', 'campaign', result.rows[0].id, JSON.stringify({ title, creator_id: creatorId }), req.ip]);
+    
+    res.status(201).json({
+      message: `Campaign "${title}" created successfully`,
+      campaign: result.rows[0]
+    });
+  } catch (err) { next(err); }
+};
+
+const updateCampaign = async (req, res, next) => {
+  try {
+    const { id } = req.params;
+    const { title, description, goal, category, status } = req.body;
+    
+    const existing = await pool.query('SELECT * FROM campaigns WHERE id = $1', [id]);
+    if (existing.rows.length === 0) {
+      return res.status(404).json({ error: 'Campaign not found' });
+    }
+    
+    const updates = [];
+    const values = [];
+    let paramCount = 1;
+    
+    if (title !== undefined) {
+      updates.push(`title = $${paramCount++}`);
+      values.push(title.trim());
+    }
+    if (description !== undefined) {
+      updates.push(`description = $${paramCount++}`);
+      values.push(description?.trim() || null);
+    }
+    if (goal !== undefined) {
+      updates.push(`goal = $${paramCount++}`);
+      values.push(parseFloat(goal));
+    }
+    if (category !== undefined) {
+      updates.push(`category = $${paramCount++}`);
+      values.push(category);
+    }
+    if (status !== undefined) {
+      updates.push(`status = $${paramCount++}`);
+      values.push(status);
+    }
+    
+    if (req.file) {
+      const oldImageId = existing.rows[0].image_file_id;
+      try {
+        const uploadResult = await uploadToImageKit(req.file.buffer, `${Date.now()}-campaign.jpg`, 'hopebridge/campaigns');
+        if (uploadResult.url) {
+          updates.push(`image_url = $${paramCount++}`);
+          values.push(uploadResult.url);
+          updates.push(`image_file_id = $${paramCount++}`);
+          values.push(uploadResult.fileId);
+          if (oldImageId) await deleteFromImageKit(oldImageId).catch(console.warn);
+        }
+      } catch (err) {
+        console.warn('Image upload failed:', err.message);
+      }
+    } else if (req.body.image_url !== undefined) {
+      updates.push(`image_url = $${paramCount++}`);
+      values.push(req.body.image_url || null);
+    }
+    
+    if (updates.length === 0) {
+      return res.status(400).json({ error: 'No fields to update' });
+    }
+    
+    values.push(id);
+    const query = `UPDATE campaigns SET ${updates.join(', ')}, updated_at = NOW() WHERE id = $${paramCount} RETURNING *`;
+    const result = await pool.query(query, values);
+    
+    await pool.query(`
+      INSERT INTO audit_logs (admin_id, action, entity_type, entity_id, details, ip_address)
+      VALUES ($1, $2, $3, $4, $5, $6)
+    `, [req.user.id, 'admin_campaign_updated', 'campaign', id, JSON.stringify(req.body), req.ip]);
+    
+    res.json({ message: 'Campaign updated successfully', campaign: result.rows[0] });
+  } catch (err) { next(err); }
+};
+
+const updateCampaignProgress = async (req, res, next) => {
+  try {
+    const { id } = req.params;
+    const { raised } = req.body;
+    
+    if (raised === undefined || parseFloat(raised) < 0) {
+      return res.status(400).json({ error: 'Valid raised amount is required' });
+    }
+    
+    const result = await pool.query(
+      `UPDATE campaigns SET raised = $1, updated_at = NOW() WHERE id = $2 RETURNING *`,
+      [parseFloat(raised), id]
+    );
+    
+    if (result.rows.length === 0) {
+      return res.status(404).json({ error: 'Campaign not found' });
+    }
+    
+    await pool.query(`
+      INSERT INTO audit_logs (admin_id, action, entity_type, entity_id, details, ip_address)
+      VALUES ($1, $2, $3, $4, $5, $6)
+    `, [req.user.id, 'campaign_progress_updated', 'campaign', id, JSON.stringify({ new_raised: parseFloat(raised) }), req.ip]);
+    
+    res.json({ message: 'Progress updated', campaign: result.rows[0] });
+  } catch (err) { next(err); }
+};
+
+// ============ ADMIN USER MANAGEMENT (NEW) ============
+
+const updateUser = async (req, res, next) => {
+  try {
+    const { id } = req.params;
+    const { name, email, role, is_verified } = req.body;
+    
+    const userCheck = await pool.query('SELECT role FROM users WHERE id = $1', [id]);
+    if (userCheck.rows.length === 0) {
+      return res.status(404).json({ error: 'User not found' });
+    }
+    if (userCheck.rows[0].role === 'admin' && req.user.id !== parseInt(id)) {
+      return res.status(403).json({ error: 'Cannot modify another admin account' });
+    }
+    
+    const result = await pool.query(
+      `UPDATE users SET 
+        name = COALESCE($1, name), 
+        email = COALESCE($2, email), 
+        role = COALESCE($3, role), 
+        is_verified = COALESCE($4, is_verified), 
+        updated_at = NOW()
+       WHERE id = $5
+       RETURNING id, name, email, role, is_verified, is_active`,
+      [name, email, role, is_verified, id]
+    );
+    
+    await pool.query(`
+      INSERT INTO audit_logs (admin_id, action, entity_type, entity_id, details, ip_address)
+      VALUES ($1, $2, $3, $4, $5, $6)
+    `, [req.user.id, 'user_updated', 'user', id, JSON.stringify({ name, email, role, is_verified }), req.ip]);
+    
+    res.json({ message: 'User updated successfully', user: result.rows[0] });
+  } catch (err) { next(err); }
+};
+
+// ============ ADMIN WALLET ADJUSTMENT (NEW) ============
+
+const adjustWallet = async (req, res, next) => {
+  const client = await pool.connect();
+  try {
+    const { userId, amount, type, reason } = req.body;
+    
+    if (!userId || !amount || amount <= 0) {
+      return res.status(400).json({ error: 'Valid user ID and amount required' });
+    }
+    
+    const adjustmentAmount = type === 'add' ? parseFloat(amount) : -parseFloat(amount);
+    
+    await client.query('BEGIN');
+    
+    const userCheck = await client.query('SELECT name, email FROM users WHERE id = $1', [userId]);
+    if (userCheck.rows.length === 0) {
+      await client.query('ROLLBACK');
+      return res.status(404).json({ error: 'User not found' });
+    }
+    
+    await client.query(
+      `INSERT INTO wallets (user_id, balance) VALUES ($1, $2)
+       ON CONFLICT (user_id) DO UPDATE SET balance = wallets.balance + $2`,
+      [userId, adjustmentAmount]
+    );
+    
+    await client.query(
+      `INSERT INTO wallet_transactions (user_id, amount, type, reference, description)
+       VALUES ($1, $2, 'admin_adjustment', $3, $4)`,
+      [userId, adjustmentAmount, `ADMIN-${Date.now()}`, reason || `Manual ${type === 'add' ? 'credit' : 'debit'} by admin`]
+    );
+    
+    await client.query(`
+      INSERT INTO audit_logs (admin_id, action, entity_type, entity_id, details, ip_address)
+      VALUES ($1, $2, $3, $4, $5, $6)
+    `, [req.user.id, 'wallet_adjustment', 'wallet', userId, JSON.stringify({ amount, type, reason, user: userCheck.rows[0] }), req.ip]);
+    
+    const newBalance = await client.query('SELECT balance FROM wallets WHERE user_id = $1', [userId]);
+    
+    await client.query('COMMIT');
+    
+    res.json({ 
+      message: `Wallet ${type === 'add' ? 'credited' : 'debited'} by $${Math.abs(adjustmentAmount)}`,
+      newBalance: parseFloat(newBalance.rows[0]?.balance || 0)
+    });
+  } catch (err) {
+    await client.query('ROLLBACK');
+    next(err);
+  } finally {
+    client.release();
   }
 };
 
@@ -648,6 +901,17 @@ module.exports = {
   updateNotificationSettings,
   sendNotification,
   getNotificationHistory,
+  
+  // Admin Campaign Management
+  createCampaign,
+  updateCampaign,
+  updateCampaignProgress,
+  
+  // Admin User Management
+  updateUser,
+  
+  // Admin Wallet Adjustment
+  adjustWallet,
   
   // Creator Verification
   getCreatorVerifications,
