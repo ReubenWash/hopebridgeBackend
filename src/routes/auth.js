@@ -12,6 +12,7 @@ const {
 } = require('../controllers/authController');
 const { authenticate } = require('../middleware/auth');
 const { validate } = require('../middleware/errorHandler');
+const pool = require('../config/db'); // Add this import for database queries
 
 // Public routes
 router.get('/verification-status', getVerificationStatus);
@@ -53,5 +54,32 @@ router.post('/resend-code',
   [body('email').isEmail().withMessage('Valid email is required').normalizeEmail()],
   validate, resendCode
 );
+
+// ============ ADD THIS NEW ROUTE ============
+// Save FCM token for push notifications
+router.post('/save-fcm-token', authenticate, async (req, res, next) => {
+  try {
+    const { token } = req.body;
+    const userId = req.user.id;
+    
+    if (!token) {
+      return res.status(400).json({ error: 'Token is required' });
+    }
+    
+    // Update user's FCM token in database
+    await pool.query(
+      `UPDATE users 
+       SET fcm_token = $1, updated_at = NOW() 
+       WHERE id = $2`,
+      [token, userId]
+    );
+    
+    console.log(`✅ FCM token saved for user ${userId}`);
+    res.json({ message: 'FCM token saved successfully' });
+  } catch (err) {
+    console.error('Save FCM token error:', err);
+    next(err);
+  }
+});
 
 module.exports = router;
