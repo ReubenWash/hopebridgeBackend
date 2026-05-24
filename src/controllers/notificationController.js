@@ -1,7 +1,29 @@
 const pool = require('../config/db');
 const { sendPushNotification, sendToRole, sendToAll, sendToUser } = require('../config/firebase');
 
-// Send notification to specific users
+// Save FCM token for a user
+const saveFCMToken = async (req, res, next) => {
+  try {
+    const { token } = req.body;
+    const userId = req.user.id;
+    
+    if (!token) {
+      return res.status(400).json({ error: 'Token is required' });
+    }
+    
+    await pool.query(
+      `UPDATE users SET fcm_token = $1, updated_at = NOW() WHERE id = $2`,
+      [token, userId]
+    );
+    
+    console.log(`✅ FCM token saved for user ${userId}`);
+    res.json({ message: 'FCM token saved successfully' });
+  } catch (err) {
+    next(err);
+  }
+};
+
+// Send notification
 const sendNotification = async (req, res, next) => {
   try {
     const { title, body, target_type, target_user_id, data, image_url } = req.body;
@@ -28,7 +50,7 @@ const sendNotification = async (req, res, next) => {
         break;
       case 'specific_user':
         if (!target_user_id) {
-          return res.status(400).json({ error: 'target_user_id required for specific_user target' });
+          return res.status(400).json({ error: 'target_user_id required' });
         }
         result = await sendToUser(target_user_id, notification, data || {});
         break;
@@ -36,7 +58,7 @@ const sendNotification = async (req, res, next) => {
         return res.status(400).json({ error: 'Invalid target_type' });
     }
     
-    // Log notification to database
+    // Log to database
     await pool.query(
       `INSERT INTO push_notifications (title, body, target_type, target_user_id, sent_count, delivered_count)
        VALUES ($1, $2, $3, $4, $5, $6)`,
@@ -78,7 +100,12 @@ const getNotificationHistory = async (req, res, next) => {
       },
     });
   } catch (err) {
-    next(err);
+    // Return empty array if table doesn't exist yet
+    if (err.message.includes('does not exist')) {
+      res.json({ notifications: [], pagination: { total: 0, pages: 0 } });
+    } else {
+      next(err);
+    }
   }
 };
 
@@ -86,7 +113,7 @@ const getNotificationHistory = async (req, res, next) => {
 const getNotificationSettings = async (req, res, next) => {
   try {
     const result = await pool.query(
-      "SELECT key, value FROM settings WHERE key IN ('push_notifications_enabled', 'firebase_server_key', 'firebase_sender_id')"
+      "SELECT key, value FROM settings WHERE key IN ('push_notifications_enabled', 'firebase_server_key')"
     );
     const settings = {};
     result.rows.forEach(row => {
@@ -96,41 +123,34 @@ const getNotificationSettings = async (req, res, next) => {
     res.json({
       enabled: settings.push_notifications_enabled === 'true',
       server_key: settings.firebase_server_key || '',
-      sender_id: settings.firebase_sender_id || '',
     });
   } catch (err) {
-    next(err);
+    // Return default settings if table doesn't exist
+    res.json({ enabled: true, server_key: '' });
   }
 };
 
 // Update notification settings
 const updateNotificationSettings = async (req, res, next) => {
-  const { enabled, server_key, sender_id } = req.body;
-  const client = await pool.connect();
-  
   try {
-    await client.query('BEGIN');
+    const { enabled, server_key } = req.body;
     
-    await client.query(
+    await pool.query(
       `INSERT INTO settings (key, value) VALUES 
         ('push_notifications_enabled', $1),
-        ('firebase_server_key', $2),
-        ('firebase_sender_id', $3)
+        ('firebase_server_key', $2)
        ON CONFLICT (key) DO UPDATE SET value = EXCLUDED.value`,
-      [enabled ? 'true' : 'false', server_key || '', sender_id || '']
+      [enabled ? 'true' : 'false', server_key || '']
     );
     
-    await client.query('COMMIT');
     res.json({ message: 'Notification settings updated', enabled });
   } catch (err) {
-    await client.query('ROLLBACK');
     next(err);
-  } finally {
-    client.release();
   }
 };
 
 module.exports = {
+  saveFCMToken,
   sendNotification,
   getNotificationHistory,
   getNotificationSettings,

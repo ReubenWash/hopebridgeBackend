@@ -1,8 +1,7 @@
-// src/routes/adminFeaturesRoutes.js
 const router = require('express').Router();
 const { requireAdmin } = require('../middleware/auth');
 
-// Import controllers (these need to exist)
+// Import controllers
 const {
   getPayoutHistory,
   markAsPaid,
@@ -18,6 +17,14 @@ const {
   getDonorAnalytics,
   getAuditLogs,
 } = require('../controllers/adminFeaturesController');
+
+// Import notification controller
+const {
+  getNotificationHistory,
+  getNotificationSettings,
+  updateNotificationSettings,
+  sendNotification,
+} = require('../controllers/notificationController');
 
 // All routes require admin authentication
 router.use(requireAdmin);
@@ -44,5 +51,11 @@ router.get('/donor-analytics', getDonorAnalytics);
 
 // ── Audit Logs ────────────────────────────────────
 router.get('/audit-logs', getAuditLogs);
+
+// ── Push Notifications ────────────────────────────
+router.get('/notification-history', getNotificationHistory);
+router.get('/notification-settings', getNotificationSettings);
+router.put('/notification-settings', updateNotificationSettings);
+router.post('/send-notification', sendNotification);
 
 module.exports = router;

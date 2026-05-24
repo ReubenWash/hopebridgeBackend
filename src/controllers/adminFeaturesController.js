@@ -1,5 +1,6 @@
 // controllers/adminFeaturesController.js
 const pool = require('../config/db');
+const { sendPushNotification, sendToRole, sendToAll, sendToUser } = require('../config/firebase');
 
 // ============ PAYOUT RECONCILIATION ============
 
@@ -47,7 +48,6 @@ const getPayoutHistory = async (req, res, next) => {
       SELECT COUNT(*) FROM withdrawal_requests wr ${where}
     `, values);
     
-    // Calculate totals
     const totals = await pool.query(`
       SELECT 
         COALESCE(SUM(amount), 0) as total_pending,
@@ -92,7 +92,6 @@ const markAsPaid = async (req, res, next) => {
       return res.status(404).json({ error: 'Withdrawal not found or not in approved state' });
     }
     
-    // Add to audit log
     await client.query(`
       INSERT INTO audit_logs (admin_id, action, entity_type, entity_id, details, ip_address)
       VALUES ($1, $2, $3, $4, $5, $6)
@@ -122,7 +121,6 @@ const getPayoutSummary = async (req, res, next) => {
       FROM withdrawal_requests
     `);
     
-    // Monthly breakdown
     const monthly = await pool.query(`
       SELECT 
         DATE_TRUNC('month', created_at) as month,
@@ -146,12 +144,9 @@ const getPayoutSummary = async (req, res, next) => {
 
 const getFeeSettings = async (req, res, next) => {
   try {
-    const result = await pool.query(`
-      SELECT * FROM platform_fees ORDER BY id DESC LIMIT 1
-    `);
+    const result = await pool.query(`SELECT * FROM platform_fees ORDER BY id DESC LIMIT 1`);
     
     if (result.rows.length === 0) {
-      // Return default settings
       return res.json({
         percentage: 0,
         fixed_amount: 0,
@@ -179,7 +174,6 @@ const updateFeeSettings = async (req, res, next) => {
       RETURNING *
     `, [percentage || 0, fixed_amount || 0, min_fee || 0, max_fee || null, withdrawal_fee || 0, minimum_withdrawal || 10, req.user.id]);
     
-    // Add to audit log
     await client.query(`
       INSERT INTO audit_logs (admin_id, action, entity_type, details, ip_address)
       VALUES ($1, $2, $3, $4, $5)
@@ -216,7 +210,7 @@ const calculateFee = async (req, res, next) => {
   } catch (err) { next(err); }
 };
 
-// ============ NOTIFICATION SYSTEM MANAGEMENT ============
+// ============ NOTIFICATION SYSTEM MANAGEMENT (UPDATED WITH MODERN FCM) ============
 
 const getNotificationSettings = async (req, res, next) => {
   try {
@@ -259,9 +253,14 @@ const updateNotificationSettings = async (req, res, next) => {
   }
 };
 
-const sendPushNotification = async (req, res, next) => {
+// UPDATED: Send notification using modern Firebase Admin SDK
+const sendNotification = async (req, res, next) => {
   try {
-    const { title, body, target_type, target_user_id, data } = req.body;
+    const { title, body, target_type, target_user_id, data, image_url } = req.body;
+    
+    if (!title || !body) {
+      return res.status(400).json({ error: 'Title and body are required' });
+    }
     
     // Get notification settings
     const settings = await pool.query(
@@ -273,67 +272,53 @@ const sendPushNotification = async (req, res, next) => {
       return res.status(400).json({ error: 'Push notifications are disabled' });
     }
     
-    // Get FCM tokens based on target
-    let tokens = [];
+    const notification = { title, body, imageUrl: image_url };
+    let result;
     
-    if (target_type === 'all') {
-      const result = await pool.query("SELECT fcm_token FROM users WHERE fcm_token IS NOT NULL");
-      tokens = result.rows.map(r => r.fcm_token);
-    } else if (target_type === 'donors') {
-      const result = await pool.query("SELECT fcm_token FROM users WHERE role = 'donor' AND fcm_token IS NOT NULL");
-      tokens = result.rows.map(r => r.fcm_token);
-    } else if (target_type === 'creators') {
-      const result = await pool.query("SELECT fcm_token FROM users WHERE role = 'creator' AND fcm_token IS NOT NULL");
-      tokens = result.rows.map(r => r.fcm_token);
-    } else if (target_type === 'specific_user' && target_user_id) {
-      const result = await pool.query("SELECT fcm_token FROM users WHERE id = $1", [target_user_id]);
-      if (result.rows[0]?.fcm_token) tokens = [result.rows[0].fcm_token];
+    // Use the modern Firebase Admin SDK functions
+    switch (target_type) {
+      case 'all':
+        result = await sendToAll(notification, data || {});
+        break;
+      case 'donors':
+        result = await sendToRole('donor', notification, data || {});
+        break;
+      case 'creators':
+        result = await sendToRole('creator', notification, data || {});
+        break;
+      case 'admins':
+        result = await sendToRole('admin', notification, data || {});
+        break;
+      case 'specific_user':
+        if (!target_user_id) {
+          return res.status(400).json({ error: 'target_user_id required for specific_user target' });
+        }
+        result = await sendToUser(target_user_id, notification, data || {});
+        break;
+      default:
+        return res.status(400).json({ error: 'Invalid target_type. Use: all, donors, creators, admins, specific_user' });
     }
     
-    // Get Firebase server key
-    const serverKeyResult = await pool.query(
-      "SELECT value FROM settings WHERE key = 'firebase_server_key'"
+    // Log notification to database
+    await pool.query(
+      `INSERT INTO push_notifications (title, body, target_type, target_user_id, sent_count, delivered_count)
+       VALUES ($1, $2, $3, $4, $5, $6)`,
+      [title, body, target_type, target_user_id || null, result.successCount || 0, result.successCount || 0]
     );
-    const serverKey = serverKeyResult.rows[0]?.value;
-    
-    if (!serverKey) {
-      return res.status(400).json({ error: 'Firebase server key not configured' });
-    }
-    
-    if (tokens.length === 0) {
-      return res.json({ message: 'No tokens to send to', sent: 0 });
-    }
-    
-    // Send push notifications via Firebase
-    const fetch = require('node-fetch');
-    const response = await fetch('https://fcm.googleapis.com/fcm/send', {
-      method: 'POST',
-      headers: {
-        'Content-Type': 'application/json',
-        'Authorization': `key=${serverKey}`,
-      },
-      body: JSON.stringify({
-        registration_ids: tokens,
-        notification: { title, body, icon: '/logo192.png', click_action: data?.click_action || '/' },
-        data: data || {},
-      }),
-    });
-    
-    const result = await response.json();
-    
-    // Log notification
-    await pool.query(`
-      INSERT INTO push_notifications (title, body, target_type, target_user_id, sent_count, delivered_count)
-      VALUES ($1, $2, $3, $4, $5, $6)
-    `, [title, body, target_type, target_user_id || null, tokens.length, result.success || 0]);
     
     res.json({
-      message: `Notification sent to ${result.success || 0} devices`,
-      success: result.success,
-      failure: result.failure
+      message: `Notification sent to ${result.successCount || 0} devices`,
+      success: result.successCount,
+      failure: result.failureCount,
     });
-  } catch (err) { next(err); }
+  } catch (err) {
+    console.error('Send notification error:', err);
+    next(err);
+  }
 };
+
+// Alias for sendNotification (for backward compatibility)
+const sendPushNotification = sendNotification;
 
 const getNotificationHistory = async (req, res, next) => {
   try {
@@ -357,7 +342,14 @@ const getNotificationHistory = async (req, res, next) => {
         pages: Math.ceil(parseInt(countResult.rows[0].count) / parseInt(limit))
       }
     });
-  } catch (err) { next(err); }
+  } catch (err) { 
+    // Return empty array if table doesn't exist yet
+    if (err.message.includes('does not exist')) {
+      res.json({ notifications: [], pagination: { total: 0, pages: 0 } });
+    } else {
+      next(err);
+    }
+  }
 };
 
 // ============ CREATOR ONBOARDING/VERIFICATION ============
@@ -388,7 +380,6 @@ const submitCreatorVerification = async (req, res, next) => {
   try {
     const { id_document_url, id_document_type, proof_of_address_url, business_registration_url } = req.body;
     
-    // Check if verification already exists
     const existing = await pool.query(
       'SELECT * FROM creator_verifications WHERE user_id = $1',
       [req.user.id]
@@ -442,14 +433,12 @@ const reviewCreatorVerification = async (req, res, next) => {
       return res.status(404).json({ error: 'Verification not found' });
     }
     
-    // Update user role to verified creator if approved
     if (status === 'approved') {
       await client.query(`
         UPDATE users SET role = 'creator' WHERE id = $1
       `, [result.rows[0].user_id]);
     }
     
-    // Add to audit log
     await client.query(`
       INSERT INTO audit_logs (admin_id, action, entity_type, entity_id, details, ip_address)
       VALUES ($1, $2, $3, $4, $5, $6)
@@ -517,7 +506,6 @@ const getRecurringDonations = async (req, res, next) => {
       ORDER BY ds.next_billing_date ASC NULLS LAST
     `, [status]);
     
-    // Calculate totals
     const totals = await pool.query(`
       SELECT 
         COUNT(*) as total_subscriptions,
@@ -572,7 +560,6 @@ const getDonorAnalytics = async (req, res, next) => {
       WHERE d.escrow_status = 'released'
     `);
     
-    // Donor retention (returning donors)
     const retention = await pool.query(`
       WITH donor_activity AS (
         SELECT 
@@ -663,7 +650,8 @@ module.exports = {
   // Notification System
   getNotificationSettings,
   updateNotificationSettings,
-  sendPushNotification,
+  sendNotification,
+  sendPushNotification, // Alias for backward compatibility
   getNotificationHistory,
   
   // Creator Verification
