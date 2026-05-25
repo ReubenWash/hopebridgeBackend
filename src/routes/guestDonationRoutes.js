@@ -7,7 +7,7 @@ const {
   sendGuestDonationApproved,
   sendGuestDonationRejected
 } = require('../utils/email');
-const { uploadToImageKit } = require('../config/imagekit'); // Match your export
+const { uploadToImageKit } = require('../config/imagekit');
 
 // Configure multer for memory storage
 const storage = multer.memoryStorage();
@@ -26,15 +26,18 @@ const upload = multer({
 
 // ─────────────────────────────────────────────
 // GUEST: REQUEST DONATION (Step 1)
+// UPDATED: Added preferred_payment_method
 // ─────────────────────────────────────────────
 router.post('/request', async (req, res) => {
-  const { campaign_id, guest_name, guest_email, amount, message } = req.body;
+  const { campaign_id, guest_name, guest_email, guest_phone, amount, message, preferred_payment_method } = req.body;
   
   try {
+    // Validation
     if (!campaign_id || !guest_email || !amount || amount <= 0) {
       return res.status(400).json({ error: 'Campaign, email, and valid amount are required' });
     }
     
+    // Check if campaign exists and is approved
     const campaignCheck = await pool.query(
       'SELECT id, title, status FROM campaigns WHERE id = $1',
       [campaign_id]
@@ -48,16 +51,29 @@ router.post('/request', async (req, res) => {
       return res.status(400).json({ error: 'Campaign is not accepting donations' });
     }
     
+    const campaign = campaignCheck.rows[0];
+    
+    // Store preferred payment method (default to bank_transfer if not specified)
+    const paymentMethod = preferred_payment_method || 'bank_transfer';
+    
+    // Create guest donation request
     const result = await pool.query(
-      `INSERT INTO guest_donations (campaign_id, guest_name, guest_email, amount, message, payment_status)
-       VALUES ($1, $2, $3, $4, $5, 'pending_instructions')
-       RETURNING id, amount, guest_email, payment_status, created_at`,
-      [campaign_id, guest_name || null, guest_email, amount, message || null]
+      `INSERT INTO guest_donations (campaign_id, guest_name, guest_email, guest_phone, amount, message, payment_method, payment_status)
+       VALUES ($1, $2, $3, $4, $5, $6, $7, 'pending_instructions')
+       RETURNING id, amount, guest_email, guest_phone, payment_method, payment_status, created_at`,
+      [campaign_id, guest_name || null, guest_email, guest_phone || null, amount, message || null, paymentMethod]
     );
     
     const guestDonation = result.rows[0];
     
-    console.log(`📧 New guest donation request #${guestDonation.id} from ${guest_email} for $${amount}`);
+    console.log(`📧 New guest donation request #${guestDonation.id} from ${guest_email} for $${amount} via ${paymentMethod}`);
+    
+    // Notify admin (you can also send an email to admin here)
+    const adminRes = await pool.query("SELECT email FROM users WHERE role = 'admin' LIMIT 1");
+    if (adminRes.rows.length > 0) {
+      // Optional: Send admin notification email
+      console.log(`🔔 Admin notification: Guest donation #${guestDonation.id} awaiting instructions`);
+    }
     
     res.status(201).json({
       success: true,
@@ -73,6 +89,7 @@ router.post('/request', async (req, res) => {
 
 // ─────────────────────────────────────────────
 // ADMIN: GET ALL GUEST DONATION REQUESTS
+// UPDATED: Includes guest_phone and preferred payment method
 // ─────────────────────────────────────────────
 router.get('/admin/guest-donations', async (req, res) => {
   try {
@@ -107,6 +124,7 @@ router.get('/admin/guest-donations', async (req, res) => {
 
 // ─────────────────────────────────────────────
 // ADMIN: SEND PAYMENT INSTRUCTIONS (Step 2)
+// UPDATED: Instructions can be tailored based on payment method
 // ─────────────────────────────────────────────
 router.post('/admin/send-instructions/:id', async (req, res) => {
   const { id } = req.params;
@@ -117,6 +135,7 @@ router.post('/admin/send-instructions/:id', async (req, res) => {
       return res.status(400).json({ error: 'Payment instructions are required' });
     }
     
+    // Get guest donation with campaign info
     const getResult = await pool.query(
       `SELECT gd.*, c.title as campaign_title 
        FROM guest_donations gd
@@ -135,15 +154,16 @@ router.post('/admin/send-instructions/:id', async (req, res) => {
       return res.status(400).json({ error: `Cannot send instructions for status: ${guestDonation.payment_status}` });
     }
     
+    // Update with instructions (preserve the original preferred payment method)
     const result = await pool.query(
       `UPDATE guest_donations 
        SET admin_instructions = $1, 
-           payment_method = $2, 
+           payment_method = COALESCE($2, payment_method),
            payment_status = 'instructions_sent',
            updated_at = NOW()
        WHERE id = $3
        RETURNING *`,
-      [instructions, payment_method || 'bank_transfer', id]
+      [instructions, payment_method || guestDonation.payment_method, id]
     );
     
     // Send email to guest
@@ -154,7 +174,8 @@ router.post('/admin/send-instructions/:id', async (req, res) => {
         amount: guestDonation.amount,
         campaignTitle: guestDonation.campaign_title,
         instructions: instructions,
-        donationId: guestDonation.id
+        donationId: guestDonation.id,
+        paymentMethod: payment_method || guestDonation.payment_method
       });
     } catch (emailError) {
       console.warn('Failed to send instructions email:', emailError.message);
@@ -173,7 +194,7 @@ router.post('/admin/send-instructions/:id', async (req, res) => {
 });
 
 // ─────────────────────────────────────────────
-// GUEST: UPLOAD PAYMENT PROOF (Step 3) - Using your ImageKit config
+// GUEST: UPLOAD PAYMENT PROOF (Step 3)
 // ─────────────────────────────────────────────
 router.post('/upload-proof/:id', upload.single('proof'), async (req, res) => {
   const { id } = req.params;
@@ -183,8 +204,9 @@ router.post('/upload-proof/:id', upload.single('proof'), async (req, res) => {
       return res.status(400).json({ error: 'Proof image is required' });
     }
     
+    // Check if donation exists and is in correct status
     const checkResult = await pool.query(
-      'SELECT payment_status FROM guest_donations WHERE id = $1',
+      'SELECT payment_status, guest_email FROM guest_donations WHERE id = $1',
       [id]
     );
     
@@ -202,8 +224,12 @@ router.post('/upload-proof/:id', upload.single('proof'), async (req, res) => {
     const fileName = `guest-proof-${id}-${Date.now()}.jpg`;
     const folder = 'hopebridge/guest-proofs';
     
-    // Upload to ImageKit using your function
+    // Upload to ImageKit
     const uploadResult = await uploadToImageKit(req.file.buffer, fileName, folder);
+    
+    if (!uploadResult.success && !uploadResult.url) {
+      throw new Error('Image upload failed');
+    }
     
     // Update database with ImageKit URL
     const result = await pool.query(
@@ -241,6 +267,7 @@ router.post('/admin/approve/:id', async (req, res) => {
   try {
     await client.query('BEGIN');
     
+    // Get guest donation with lock
     const guestResult = await client.query(
       `SELECT gd.*, c.title as campaign_title, c.creator_id
        FROM guest_donations gd
@@ -322,6 +349,7 @@ router.post('/admin/reject/:id', async (req, res) => {
   const { reason } = req.body;
   
   try {
+    // Get guest donation with campaign info
     const getResult = await pool.query(
       `SELECT gd.*, c.title as campaign_title 
        FROM guest_donations gd
@@ -384,7 +412,7 @@ router.get('/status/:id', async (req, res) => {
   
   try {
     const result = await pool.query(
-      `SELECT id, amount, payment_status, admin_instructions, proof_image_url, created_at, updated_at
+      `SELECT id, amount, payment_status, admin_instructions, proof_image_url, payment_method, created_at, updated_at
        FROM guest_donations 
        WHERE id = $1`,
       [id]
@@ -423,6 +451,30 @@ router.get('/admin/stats', async (req, res) => {
   } catch (error) {
     console.error('Get guest donation stats error:', error);
     res.status(500).json({ error: 'Failed to fetch stats' });
+  }
+});
+
+// ─────────────────────────────────────────────
+// ADMIN: GET PAYMENT METHOD STATISTICS
+// ─────────────────────────────────────────────
+router.get('/admin/payment-methods', async (req, res) => {
+  try {
+    const result = await pool.query(`
+      SELECT 
+        payment_method,
+        COUNT(*) as total,
+        SUM(CASE WHEN payment_status = 'approved' THEN 1 ELSE 0 END) as approved,
+        SUM(CASE WHEN payment_status = 'pending_verification' THEN 1 ELSE 0 END) as pending,
+        COALESCE(SUM(CASE WHEN payment_status = 'approved' THEN amount ELSE 0 END), 0) as total_amount
+      FROM guest_donations
+      GROUP BY payment_method
+      ORDER BY total DESC
+    `);
+    
+    res.json({ paymentMethods: result.rows });
+  } catch (error) {
+    console.error('Get payment method stats error:', error);
+    res.status(500).json({ error: 'Failed to fetch payment method stats' });
   }
 });
 
