@@ -40,7 +40,7 @@ const {
   getAllWithdrawalRequests,
   approveWithdrawal,
   rejectWithdrawal,
-  adjustWalletBalance,  // ← This is the correct one from adminWalletController
+  adjustWalletBalance,
   getUserWalletDetails,
 } = require('../controllers/adminWalletController')
 const {
@@ -61,7 +61,6 @@ const {
   updateCampaign,
   updateCampaignProgress,
   updateUser,
-  // adjustWallet,  // ← REMOVED from adminFeaturesController
 } = require('../controllers/adminFeaturesController')
 
 // NOTE: authenticate runs once in server.js
@@ -134,14 +133,14 @@ router.get('/stats', getStats)
 router.get('/users', getAllUsers)
 router.patch('/users/:id/toggle', toggleUserActive)
 
-// ============ USER MANAGEMENT (NEW) ============
-router.post('/users', addUser)                                    // Add new user
-router.put('/users/:id', updateUser)                              // Edit user
-router.delete('/users/:id', deleteUser)                          // Delete user
-router.patch('/users/:id/verify', verifyUser)                    // Verify user
-router.patch('/users/:id/unverify', unverifyUser)                // Unverify user
-router.post('/change-password', changePassword)                  // Change admin password
-router.post('/admins', addAdmin)                                 // Add new admin
+// ============ USER MANAGEMENT ============
+router.post('/users', addUser)
+router.put('/users/:id', updateUser)
+router.delete('/users/:id', deleteUser)
+router.patch('/users/:id/verify', verifyUser)
+router.patch('/users/:id/unverify', unverifyUser)
+router.post('/change-password', changePassword)
+router.post('/admins', addAdmin)
 
 // Campaigns
 router.get('/campaigns', adminGetAllCampaigns)
@@ -149,13 +148,8 @@ router.patch('/campaigns/:id/status', adminUpdateStatus)
 router.get('/donations', adminGetAllDonations)
 
 // ============ ADMIN CAMPAIGN MANAGEMENT ============
-// Admin can create campaigns for creators
 router.post('/campaigns/create', upload.single('image'), createCampaign)
-
-// Admin can update any campaign (FULL EDIT)
 router.put('/campaigns/:id', upload.single('image'), updateCampaign)
-
-// Admin can update campaign progress
 router.patch('/campaigns/:id/progress', updateCampaignProgress)
 
 // Admin can get campaign by ID
@@ -181,9 +175,8 @@ router.get('/campaigns/:id', async (req, res, next) => {
 });
 
 // ============ ADMIN WALLET MANAGEMENT ============
-// FIXED: Using adjustWalletBalance from adminWalletController (not adjustWallet from adminFeaturesController)
-router.post('/wallet/adjust', adjustWalletBalance)               // Adjust wallet balance
-router.get('/wallet/user/:userId', getUserWalletDetails)          // Get user wallet details
+router.post('/wallet/adjust', adjustWalletBalance)
+router.get('/wallet/user/:userId', getUserWalletDetails)
 
 // Disputes
 router.get('/disputes', getDisputes)
@@ -198,7 +191,7 @@ router.put('/theme', saveTheme)
 router.get('/settings', getSettings)
 router.put('/settings', saveSettings)
 
-// Content
+// ============ CONTENT MANAGEMENT (FIXED) ============
 router.get('/content', getContent)
 router.put('/content', saveContent)
 
@@ -230,7 +223,8 @@ router.get('/withdrawal-requests', getAllWithdrawalRequests)
 router.put('/withdrawal-requests/:id/approve', approveWithdrawal)
 router.put('/withdrawal-requests/:id/reject', rejectWithdrawal)
 
-// Escrow & Campaign Completion
+// ============ ESCROW & CAMPAIGN COMPLETION ============
+// IMPORTANT: These MUST come before /campaigns/:id route
 router.get('/campaigns/completion-requests', getCompletionRequests)
 router.post('/campaigns/:id/release-escrow', adminReleaseCampaignEscrow)
 router.post('/campaigns/:id/refund-escrow', adminRefundCampaignEscrow)
@@ -286,4 +280,4 @@ router.put('/notification-settings', async (req, res) => {
   }
 });
 
-module.exports = router
+module.exports = router;

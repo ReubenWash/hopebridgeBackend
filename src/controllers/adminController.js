@@ -62,7 +62,6 @@ const addUser = async (req, res, next) => {
   try {
     const { name, email, password, role = 'donor', is_verified = true } = req.body;
     
-    // Check if user already exists
     const existing = await pool.query('SELECT id FROM users WHERE email = $1', [email]);
     if (existing.rows.length > 0) {
       return res.status(409).json({ error: 'User with this email already exists' });
@@ -79,17 +78,14 @@ const addUser = async (req, res, next) => {
     
     const user = result.rows[0];
     
-    // Create wallet for user
     await pool.query(
       `INSERT INTO wallets (user_id, balance) VALUES ($1, 0) ON CONFLICT (user_id) DO NOTHING`,
       [user.id]
     );
     
-    // Send welcome email
     sendWelcomeEmail({ to: user.email, name: user.name, role: user.role })
       .catch(err => console.warn('Welcome email failed:', err.message));
     
-    // Log to audit
     await pool.query(`
       INSERT INTO audit_logs (admin_id, action, entity_type, entity_id, details, ip_address)
       VALUES ($1, $2, $3, $4, $5, $6)
@@ -110,7 +106,6 @@ const deleteUser = async (req, res, next) => {
   try {
     await client.query('BEGIN');
     
-    // Check if user exists and is not admin
     const userCheck = await client.query(
       'SELECT id, name, email, role FROM users WHERE id = $1',
       [id]
@@ -126,13 +121,11 @@ const deleteUser = async (req, res, next) => {
       return res.status(403).json({ error: 'Cannot delete admin accounts' });
     }
     
-    // Log to audit before deletion
     await client.query(`
       INSERT INTO audit_logs (admin_id, action, entity_type, entity_id, details, ip_address)
       VALUES ($1, $2, $3, $4, $5, $6)
     `, [req.user.id, 'user_deleted', 'user', id, JSON.stringify({ user: userCheck.rows[0] }), req.ip]);
     
-    // Delete user (cascade will handle related records)
     await client.query('DELETE FROM users WHERE id = $1', [id]);
     
     await client.query('COMMIT');
@@ -161,7 +154,6 @@ const verifyUser = async (req, res, next) => {
       return res.status(404).json({ error: 'User not found or cannot modify admin' });
     }
     
-    // Log to audit
     await pool.query(`
       INSERT INTO audit_logs (admin_id, action, entity_type, entity_id, details, ip_address)
       VALUES ($1, $2, $3, $4, $5, $6)
@@ -186,7 +178,6 @@ const unverifyUser = async (req, res, next) => {
       return res.status(404).json({ error: 'User not found or cannot modify admin' });
     }
     
-    // Log to audit
     await pool.query(`
       INSERT INTO audit_logs (admin_id, action, entity_type, entity_id, details, ip_address)
       VALUES ($1, $2, $3, $4, $5, $6)
@@ -202,7 +193,6 @@ const changePassword = async (req, res, next) => {
     const { oldPassword, newPassword } = req.body;
     const userId = req.user.id;
     
-    // Get current user
     const result = await pool.query(
       'SELECT password FROM users WHERE id = $1',
       [userId]
@@ -212,22 +202,18 @@ const changePassword = async (req, res, next) => {
       return res.status(404).json({ error: 'User not found' });
     }
     
-    // Verify old password
     const valid = await bcrypt.compare(oldPassword, result.rows[0].password);
     if (!valid) {
       return res.status(401).json({ error: 'Current password is incorrect' });
     }
     
-    // Hash new password
     const hashedPassword = await bcrypt.hash(newPassword, 10);
     
-    // Update password
     await pool.query(
       'UPDATE users SET password = $1, updated_at = NOW() WHERE id = $2',
       [hashedPassword, userId]
     );
     
-    // Log to audit
     await pool.query(`
       INSERT INTO audit_logs (admin_id, action, entity_type, entity_id, details, ip_address)
       VALUES ($1, $2, $3, $4, $5, $6)
@@ -242,7 +228,6 @@ const addAdmin = async (req, res, next) => {
   try {
     const { name, email, password } = req.body;
     
-    // Check if user already exists
     const existing = await pool.query('SELECT id FROM users WHERE email = $1', [email]);
     if (existing.rows.length > 0) {
       return res.status(409).json({ error: 'User with this email already exists' });
@@ -259,13 +244,11 @@ const addAdmin = async (req, res, next) => {
     
     const user = result.rows[0];
     
-    // Create wallet for admin
     await pool.query(
       `INSERT INTO wallets (user_id, balance) VALUES ($1, 0) ON CONFLICT (user_id) DO NOTHING`,
       [user.id]
     );
     
-    // Log to audit
     await pool.query(`
       INSERT INTO audit_logs (admin_id, action, entity_type, entity_id, details, ip_address)
       VALUES ($1, $2, $3, $4, $5, $6)
@@ -346,6 +329,8 @@ const getSettings = async (req, res, next) => {
     for (const row of result.rows) {
       if (row.key === 'theme') {
         settings.theme = JSON.parse(row.value);
+      } else if (row.key === 'content') {
+        settings.content = JSON.parse(row.value);
       } else {
         if (!settings.keys) settings.keys = {};
         settings.keys[row.key] = row.value;
@@ -357,7 +342,7 @@ const getSettings = async (req, res, next) => {
 
 const saveSettings = async (req, res, next) => {
   try {
-    const { theme, keys } = req.body;
+    const { theme, keys, content } = req.body;
     const client = await pool.connect();
     try {
       await client.query('BEGIN');
@@ -366,6 +351,13 @@ const saveSettings = async (req, res, next) => {
           `INSERT INTO settings (key, value) VALUES ('theme', $1)
            ON CONFLICT (key) DO UPDATE SET value = EXCLUDED.value`,
           [JSON.stringify(theme)]
+        );
+      }
+      if (content) {
+        await client.query(
+          `INSERT INTO settings (key, value) VALUES ('content', $1)
+           ON CONFLICT (key) DO UPDATE SET value = EXCLUDED.value`,
+          [JSON.stringify(content)]
         );
       }
       if (keys) {
@@ -386,25 +378,94 @@ const saveSettings = async (req, res, next) => {
   } catch (err) { next(err); }
 };
 
-// ── Content ─────────────────────────────────────────────────────────
+// ── Content (UPDATED - Stores individual content fields separately) ──
 const getContent = async (req, res, next) => {
   try {
-    const result = await pool.query("SELECT value FROM settings WHERE key = 'content'");
-    const content = result.rows.length ? JSON.parse(result.rows[0].value) : {};
+    // Try to get content from settings table
+    const result = await pool.query(
+      "SELECT value FROM settings WHERE key = 'content'"
+    );
+    
+    let content = {
+      hero_title: 'Every Contribution Builds A Brighter Tomorrow',
+      hero_subtitle: 'Join thousands of donors empowering education, healthcare, and clean water across the globe.',
+      hero_badge: 'Making A Real Difference',
+      impact_stats: { raised: '$0', campaigns: '0', donors: '0' },
+      social_links: { facebook: '', twitter: '', instagram: '', youtube: '', linkedin: '' }
+    };
+    
+    if (result.rows.length) {
+      const savedContent = JSON.parse(result.rows[0].value);
+      content = { ...content, ...savedContent };
+    }
+    
     res.json({ content });
-  } catch (err) { next(err); }
+  } catch (err) { 
+    console.error('Get content error:', err);
+    // Return default content on error
+    res.json({ 
+      content: {
+        hero_title: 'Every Contribution Builds A Brighter Tomorrow',
+        hero_subtitle: 'Join thousands of donors empowering education, healthcare, and clean water across the globe.',
+        hero_badge: 'Making A Real Difference',
+        impact_stats: { raised: '$0', campaigns: '0', donors: '0' },
+        social_links: { facebook: '', twitter: '', instagram: '', youtube: '', linkedin: '' }
+      }
+    });
+  }
 };
 
 const saveContent = async (req, res, next) => {
   try {
-    const content = req.body;
+    const { hero_title, hero_subtitle, hero_badge, impact_stats, social_links } = req.body;
+    
+    const content = {
+      hero_title: hero_title || 'Every Contribution Builds A Brighter Tomorrow',
+      hero_subtitle: hero_subtitle || 'Join thousands of donors empowering education, healthcare, and clean water across the globe.',
+      hero_badge: hero_badge || 'Making A Real Difference',
+      impact_stats: impact_stats || { raised: '$0', campaigns: '0', donors: '0' },
+      social_links: social_links || { facebook: '', twitter: '', instagram: '', youtube: '', linkedin: '' }
+    };
+    
     await pool.query(
       `INSERT INTO settings (key, value) VALUES ('content', $1)
        ON CONFLICT (key) DO UPDATE SET value = EXCLUDED.value`,
       [JSON.stringify(content)]
     );
-    res.json({ message: 'Content saved.' });
-  } catch (err) { next(err); }
+    
+    // Also store individual settings for easier access
+    await pool.query(
+      `INSERT INTO settings (key, value) VALUES ('hero_title', $1)
+       ON CONFLICT (key) DO UPDATE SET value = EXCLUDED.value`,
+      [hero_title || 'Every Contribution Builds A Brighter Tomorrow']
+    );
+    
+    await pool.query(
+      `INSERT INTO settings (key, value) VALUES ('hero_subtitle', $1)
+       ON CONFLICT (key) DO UPDATE SET value = EXCLUDED.value`,
+      [hero_subtitle || 'Join thousands of donors empowering education, healthcare, and clean water across the globe.']
+    );
+    
+    await pool.query(
+      `INSERT INTO settings (key, value) VALUES ('hero_badge', $1)
+       ON CONFLICT (key) DO UPDATE SET value = EXCLUDED.value`,
+      [hero_badge || 'Making A Real Difference']
+    );
+    
+    // Log to audit
+    await pool.query(`
+      INSERT INTO audit_logs (admin_id, action, entity_type, entity_id, details, ip_address)
+      VALUES ($1, $2, $3, $4, $5, $6)
+    `, [req.user.id, 'content_updated', 'settings', 0, JSON.stringify({ content }), req.ip]);
+    
+    res.json({ 
+      message: 'Content saved successfully. Changes will appear on the homepage.',
+      content 
+    });
+  } catch (err) { 
+    console.error('Save content error:', err);
+    next(err); 
+  }
 };
 
 // ── Mass Mail ────────────────────────────────────────────────────────
@@ -497,7 +558,6 @@ const saveAdminFCMToken = async (req, res, next) => {
     const { token } = req.body;
     const adminId = req.user.id;
     
-    // Verify user is admin
     const adminCheck = await pool.query(
       'SELECT role FROM users WHERE id = $1',
       [adminId]
@@ -649,7 +709,6 @@ const sendTestPushNotification = async (req, res, next) => {
   try {
     const { title, body } = req.body;
     
-    // Get all admin FCM tokens
     const tokensResult = await pool.query(
       'SELECT token FROM admin_fcm_tokens'
     );
@@ -660,7 +719,6 @@ const sendTestPushNotification = async (req, res, next) => {
       return res.status(400).json({ error: 'No admin FCM tokens found' });
     }
     
-    // Get Firebase server key from settings
     const firebaseKeyResult = await pool.query(
       "SELECT value FROM settings WHERE key = 'firebase_server_key'"
     );
@@ -673,7 +731,6 @@ const sendTestPushNotification = async (req, res, next) => {
       return res.status(400).json({ error: 'Firebase server key not configured' });
     }
     
-    // Send push notification via Firebase
     const fetch = require('node-fetch');
     const response = await fetch('https://fcm.googleapis.com/fcm/send', {
       method: 'POST',
