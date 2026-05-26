@@ -17,9 +17,9 @@ const walletRoutes   = require('./routes/wallet')
 const userRoutes     = require('./routes/users')
 const adminFeaturesRoutes = require('./routes/adminFeaturesRoutes')
 const notificationRoutes = require('./routes/notificationRoutes')
-const guestDonationRoutes = require('./routes/guestDonationRoutes') // ADD THIS
+const guestDonationRoutes = require('./routes/guestDonationRoutes')
 
-const { authenticate } = require('./middleware/auth')
+const { authenticate, requireAdmin } = require('./middleware/auth')
 const { errorHandler } = require('./middleware/errorHandler')
 const { migrate } = require('./config/migrate')
 const pool = require('./config/db')
@@ -136,7 +136,7 @@ const mkLimiter = (max, windowMs = 15 * 60 * 1000, message = 'Too many requests.
 const relaxedLimiter = mkLimiter(500)
 const authLimiter    = mkLimiter(20,  15 * 60 * 1000, 'Too many auth attempts. Try again later.')
 const notificationLimiter = mkLimiter(10,  60 * 1000, 'Too many notification requests. Please wait.')
-const guestDonationLimiter = mkLimiter(5, 60 * 60 * 1000, 'Too many guest donation requests. Please wait an hour.') // ADD THIS
+const guestDonationLimiter = mkLimiter(5, 60 * 60 * 1000, 'Too many guest donation requests. Please wait an hour.')
 
 /* ── Body parsers ───────────────────────────────── */
 app.use('/api/webhooks', express.raw({ type: 'application/json' }))
@@ -294,6 +294,69 @@ app.post('/api/admin/emergency-login', async (req, res) => {
   }
 });
 
+/* ========== CONTENT ROUTES (ADDED) ========== */
+const contentRouter = express.Router();
+
+// GET /api/content – public (used by homepage and admin editor)
+contentRouter.get('/', async (req, res, next) => {
+  try {
+    const result = await pool.query("SELECT value FROM settings WHERE key = 'content'");
+    const defaultContent = {
+      hero_badge: 'Making A Real Difference',
+      hero_title: 'Every Contribution Builds A Brighter Tomorrow',
+      hero_subtitle: 'Join thousands of donors empowering education, healthcare, and clean water across the globe.',
+      impact_stats: {
+        active_projects: 0,
+        funds_raised: '$0',
+        transparency: '100%',
+        program_efficiency: '89%',
+        lives_impacted: '14K+',
+        projects_funded: '120+'
+      },
+      social_links: {
+        facebook: '#',
+        twitter: '#',
+        instagram: '#',
+        linkedin: '#'
+      }
+    };
+    
+    if (result.rows.length && result.rows[0].value) {
+      const saved = JSON.parse(result.rows[0].value);
+      const merged = {
+        ...defaultContent,
+        ...saved,
+        impact_stats: { ...defaultContent.impact_stats, ...(saved.impact_stats || {}) },
+        social_links: { ...defaultContent.social_links, ...(saved.social_links || {}) }
+      };
+      return res.json(merged);
+    }
+    res.json(defaultContent);
+  } catch (err) { next(err); }
+});
+
+// PUT /api/content – admin only (used by admin dashboard)
+contentRouter.put('/', authenticate, requireAdmin, async (req, res, next) => {
+  try {
+    const { hero_badge, hero_title, hero_subtitle, impact_stats, social_links } = req.body;
+    const content = {
+      hero_badge,
+      hero_title,
+      hero_subtitle,
+      impact_stats,
+      social_links
+    };
+    await pool.query(
+      `INSERT INTO settings (key, value) VALUES ('content', $1)
+       ON CONFLICT (key) DO UPDATE SET value = EXCLUDED.value`,
+      [JSON.stringify(content)]
+    );
+    res.json({ message: 'Content updated successfully', content });
+  } catch (err) { next(err); }
+});
+
+app.use('/api/content', contentRouter);
+
 /* ── API routes ─────────────────────────────────── */
 app.use('/api/campaigns', relaxedLimiter, campaignRoutes)
 app.use('/api/users',     relaxedLimiter, userRoutes)
@@ -305,8 +368,7 @@ app.use('/api/admin/features', authenticate, adminFeaturesRoutes)
 app.use('/api/admin/notifications', authenticate, notificationRoutes)
 app.use('/api/wallet',    walletRoutes)
 
-// GUEST DONATION ROUTES (ADD THIS SECTION)
-// Guest routes do NOT require authentication
+// GUEST DONATION ROUTES
 app.use('/api/guest-donations', guestDonationLimiter, guestDonationRoutes)
 
 /* ── 404 handler ────────────────────────────────── */
@@ -345,6 +407,7 @@ runMigrations().then(() => {
     console.log(`🔐 Emergency admin login available at: /api/admin/emergency-login`)
     console.log(`📱 Push notification routes available at: /api/admin/notifications`)
     console.log(`👥 GUEST DONATION routes available at: /api/guest-donations`)
+    console.log(`📝 CONTENT routes available at: /api/content`)
   })
 }).catch(err => {
   console.error('Fatal startup error:', err)
