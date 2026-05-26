@@ -73,6 +73,34 @@ router.get('/:id/gallery', async (req, res, next) => {
   }
 });
 
+// ── Contact Creator (public) ──
+router.post('/:id/contact', async (req, res, next) => {
+  try {
+    const { id } = req.params;
+    const { name, email, message } = req.body;
+    if (!name || !email || !message) {
+      return res.status(400).json({ error: 'All fields required' });
+    }
+    // Get campaign and creator email
+    const campaignRes = await pool.query(
+      `SELECT c.id, c.title, u.email as creator_email, u.name as creator_name
+       FROM campaigns c
+       JOIN users u ON c.creator_id = u.id
+       WHERE c.id = $1`,
+      [id]
+    );
+    if (campaignRes.rows.length === 0) {
+      return res.status(404).json({ error: 'Campaign not found' });
+    }
+    const campaign = campaignRes.rows[0];
+    // Here you would send an email to campaign.creator_email using your email service
+    // For now, log and return success
+    console.log(`📧 Contact request for campaign "${campaign.title}": from ${name} (${email}): ${message}`);
+    // TODO: Implement email sending (e.g., using nodemailer or your email utility)
+    res.json({ message: 'Message sent to creator' });
+  } catch (err) { next(err); }
+});
+
 // ── Creator ──────────────────────────────────────
 router.post('/',
   authenticate, requireCreator,
