@@ -6,6 +6,7 @@ const {
   sendDepositStatusEmail,
   sendWithdrawalStatusEmail,
 } = require('../utils/email');
+const { uploadToImageKit } = require('../config/imagekit'); // 👈 ADD THIS
 
 // ─────────────────────────────────────────────
 // WALLET BALANCE
@@ -138,19 +139,26 @@ const getMyDepositRequests = async (req, res, next) => {
 };
 
 // ─────────────────────────────────────────────
-// UPLOAD PAYMENT PROOF
+// UPLOAD PAYMENT PROOF (FIXED for ImageKit)
 // ─────────────────────────────────────────────
 const uploadProof = async (req, res, next) => {
   try {
     const { requestId } = req.params;
+    const file = req.file;
 
-    const proofImageUrl = req.file
-      ? `${req.protocol}://${req.get('host')}/uploads/${req.file.filename}`
-      : req.body.proof_image_url;
-
-    if (!proofImageUrl) {
-      return res.status(400).json({ error: 'Proof image is required' });
+    if (!file) {
+      return res.status(400).json({ error: 'No proof image uploaded' });
     }
+
+    // Upload to ImageKit
+    const fileName = `proof-${requestId}-${Date.now()}.jpg`;
+    const uploadResult = await uploadToImageKit(file.buffer, fileName, 'hopebridge/proofs');
+
+    if (!uploadResult || !uploadResult.url) {
+      throw new Error('ImageKit upload failed – no URL returned');
+    }
+
+    const proofImageUrl = uploadResult.url; // Full ImageKit URL
 
     const result = await pool.query(
       `UPDATE deposit_requests
@@ -183,7 +191,10 @@ const uploadProof = async (req, res, next) => {
       message: 'Proof uploaded successfully. Admin will verify and credit your wallet.',
       request: result.rows[0],
     });
-  } catch (err) { next(err); }
+  } catch (err) {
+    console.error('Upload proof error:', err);
+    next(err);
+  }
 };
 
 // ─────────────────────────────────────────────

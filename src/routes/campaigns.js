@@ -12,7 +12,7 @@ const {
   getMyCampaigns,
   requestCampaignCompletion,
 } = require('../controllers/campaignController')
-const { authenticate, requireCreator } = require('../middleware/auth')
+const { authenticate, requireCreator, requireAdmin } = require('../middleware/auth')
 const { validate } = require('../middleware/errorHandler')
 const upload = require('../middleware/upload')
 const pool = require('../config/db')
@@ -87,6 +87,24 @@ router.delete('/:id', authenticate, requireCreator, deleteCampaign)
 
 // Creator requests escrow release
 router.post('/:id/complete-request', authenticate, requireCreator, requestCampaignCompletion)
+
+// ── ADMIN: Update campaign progress (raised amount) ──
+router.patch('/:id/progress', authenticate, requireAdmin, async (req, res, next) => {
+  try {
+    const { id } = req.params
+    const { raised } = req.body
+    if (raised === undefined || isNaN(parseFloat(raised))) {
+      return res.status(400).json({ error: 'Valid raised amount required' })
+    }
+    await pool.query(
+      'UPDATE campaigns SET raised = $1 WHERE id = $2',
+      [parseFloat(raised), id]
+    )
+    res.json({ message: 'Progress updated successfully' })
+  } catch (err) {
+    next(err)
+  }
+})
 
 // ── Creator Gallery Management (NEW) ──────────────────────────────
 
