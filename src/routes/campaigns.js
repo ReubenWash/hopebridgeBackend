@@ -58,6 +58,21 @@ router.get('/:id', getCampaign)
 router.get('/:id/updates', getCampaignUpdates)
 router.get('/:id/related', getRelatedCampaigns)
 
+// ── Public Gallery endpoint (no authentication) ──
+router.get('/:id/gallery', async (req, res, next) => {
+  try {
+    const { id } = req.params;
+    const result = await pool.query(
+      'SELECT id, image_url, position FROM campaign_gallery WHERE campaign_id = $1 ORDER BY position ASC, created_at ASC',
+      [id]
+    );
+    const images = result.rows.map(row => row.image_url);
+    res.json({ images });
+  } catch (err) {
+    next(err);
+  }
+});
+
 // ── Creator ──────────────────────────────────────
 router.post('/',
   authenticate, requireCreator,
@@ -106,9 +121,9 @@ router.patch('/:id/progress', authenticate, requireAdmin, async (req, res, next)
   }
 })
 
-// ── Creator Gallery Management (NEW) ──────────────────────────────
+// ── Creator Gallery Management (authenticated) ──
 
-// GET campaign with gallery images
+// GET campaign with gallery images (creator only)
 router.get('/creator/:id', authenticate, requireCreator, async (req, res, next) => {
   try {
     const { id } = req.params;
