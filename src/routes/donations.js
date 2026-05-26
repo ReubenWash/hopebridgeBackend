@@ -16,15 +16,19 @@ const {
 const { authenticate, requireCreator } = require('../middleware/auth');
 const { validate } = require('../middleware/errorHandler');
 
+// ── PUBLIC ROUTE (no authentication) ──
+// Get donations for a campaign – anyone can see donor names and amounts
+router.get('/campaign/:id', getCampaignDonations);
+
 // Auth required routes for donors
 router.get('/my', authenticate, getMyDonations);
 
 // Get single donation by ID (for receipt/invoice)
 router.get('/:id', authenticate, getDonationById);
 
-// Creator routes – view donations for their campaigns
+// Creator routes – view donations for their campaigns (authenticated + creator)
 router.get(
-  '/campaign/:id',
+  '/campaign/creator/:id',
   authenticate,
   requireCreator,
   getCampaignDonations
@@ -91,8 +95,5 @@ router.patch(
   validate,
   updateCampaignProgress
 );
-
-// All donation creation is now handled by wallet routes (with escrow)
-// No PayPal or direct card endpoints remain
 
 module.exports = router;
