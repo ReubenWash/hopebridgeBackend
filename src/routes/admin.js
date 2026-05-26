@@ -191,7 +191,7 @@ router.put('/theme', saveTheme)
 router.get('/settings', getSettings)
 router.put('/settings', saveSettings)
 
-// ============ CONTENT MANAGEMENT (FIXED) ============
+// ============ CONTENT MANAGEMENT ============
 router.get('/content', getContent)
 router.put('/content', saveContent)
 
@@ -253,6 +253,54 @@ router.get('/donor-analytics', getDonorAnalytics)
 
 // Audit Logs
 router.get('/audit-logs', getAuditLogs)
+
+// ============ GUEST DONATION SETTINGS (Payment Instructions) ============
+// Get payment method templates
+router.get('/guest-payment-instructions', async (req, res) => {
+  try {
+    const result = await pool.query(
+      "SELECT value FROM settings WHERE key = 'payment_instructions'"
+    );
+    let instructions = {};
+    if (result.rows.length) {
+      try {
+        instructions = JSON.parse(result.rows[0].value);
+      } catch(e) { console.warn(e); }
+    }
+    const defaults = {
+      bank_transfer: 'Bank: HopeBridge Foundation\nAccount: 1234567890\nSort Code: 12-34-56\nReference: Your Donation ID',
+      mobile_money: 'Mobile Money Number: +233 20 123 4567\nNetwork: MTN\nReference: Donation ID',
+      cash: 'Please visit our office at 123 Charity Street, Accra, with your Donation ID.',
+      paypal: 'PayPal: pay@hopebridge.org (please include Donation ID in note)',
+      crypto: 'BTC Address: 1A1zP1eP5QGefi2DMPTfTL5SLmv7DivfNa\nETH Address: 0x742d35Cc6634C0532925a3b844Bc9e7595f0b09e',
+      western_union: 'Western Union: John Doe, Accra, Ghana. Reference: Donation ID'
+    };
+    instructions = { ...defaults, ...instructions };
+    res.json({ instructions });
+  } catch (err) {
+    console.error(err);
+    res.status(500).json({ error: 'Failed to fetch payment instructions' });
+  }
+});
+
+// Update payment method templates
+router.put('/guest-payment-instructions', async (req, res) => {
+  try {
+    const { instructions } = req.body;
+    if (!instructions || typeof instructions !== 'object') {
+      return res.status(400).json({ error: 'Invalid instructions object' });
+    }
+    await pool.query(
+      `INSERT INTO settings (key, value) VALUES ('payment_instructions', $1)
+       ON CONFLICT (key) DO UPDATE SET value = EXCLUDED.value`,
+      [JSON.stringify(instructions)]
+    );
+    res.json({ message: 'Payment instructions saved successfully' });
+  } catch (err) {
+    console.error(err);
+    res.status(500).json({ error: 'Failed to save payment instructions' });
+  }
+});
 
 // ============ NOTIFICATION SETTINGS ============
 router.get('/notification-settings', async (req, res) => {

@@ -79,9 +79,6 @@ router.post('/request', async (req, res) => {
     
     console.log(`📧 New guest donation request #${guestDonation.id} from ${guest_email} for $${amount} via ${finalPaymentMethod}`);
     
-    // Optionally notify admin (no email required – just log)
-    // You can add admin email notification here if needed
-    
     res.status(201).json({
       success: true,
       message: 'Donation request received. Admin will provide payment instructions shortly.',
@@ -489,5 +486,97 @@ router.get('/admin/payment-methods', async (req, res) => {
     res.status(500).json({ error: 'Failed to fetch payment method stats' });
   }
 });
+
+// ============================================================
+// AUTO-INSTRUCTION FALLBACK (Runs every 3 minutes)
+// Sends payment instructions after 5 minutes of inactivity
+// ============================================================
+const checkStaleGuestDonations = async () => {
+  try {
+    // Fetch the current payment instructions from settings
+    const instructionsResult = await pool.query(
+      "SELECT value FROM settings WHERE key = 'payment_instructions'"
+    );
+    let instructionsMap = {};
+    if (instructionsResult.rows.length) {
+      try {
+        instructionsMap = JSON.parse(instructionsResult.rows[0].value);
+      } catch (e) {
+        console.warn('Invalid JSON in payment_instructions, using defaults', e);
+      }
+    }
+
+    // Fallback defaults if none exist in settings
+    const defaults = {
+      bank_transfer: 'Bank: HopeBridge Foundation\nAccount: 1234567890\nSort Code: 12-34-56\nReference: Your Donation ID',
+      mobile_money: 'Mobile Money Number: +233 20 123 4567\nNetwork: MTN\nReference: Donation ID',
+      cash: 'Please visit our office at 123 Charity Street, Accra, with your Donation ID.',
+      paypal: 'PayPal: pay@hopebridge.org (please include Donation ID in note)',
+      crypto: 'BTC Address: 1A1zP1eP5QGefi2DMPTfTL5SLmv7DivfNa\nETH Address: 0x742d35Cc6634C0532925a3b844Bc9e7595f0b09e',
+      western_union: 'Western Union: John Doe, Accra, Ghana. Reference: Donation ID'
+    };
+    instructionsMap = { ...defaults, ...instructionsMap };
+
+    // Find donations stuck in 'pending_instructions' for over 5 minutes
+    const stale = await pool.query(`
+      SELECT gd.id, gd.guest_email, gd.guest_name, gd.amount, gd.payment_method, gd.campaign_id, c.title AS campaign_title
+      FROM guest_donations gd
+      JOIN campaigns c ON gd.campaign_id = c.id
+      WHERE gd.payment_status = 'pending_instructions'
+        AND gd.created_at < NOW() - INTERVAL '5 minutes'
+    `);
+
+    for (const donation of stale.rows) {
+      const method = donation.payment_method || 'bank_transfer';
+      let instructions = instructionsMap[method];
+      if (!instructions) {
+        instructions = `Please complete your payment using ${method}. Contact support@hopebridge.org if you need assistance.`;
+      }
+
+      // Update the donation
+      await pool.query(
+        `UPDATE guest_donations
+         SET admin_instructions = $1,
+             payment_status = 'instructions_sent',
+             updated_at = NOW()
+         WHERE id = $2`,
+        [instructions, donation.id]
+      );
+
+      console.log(`🤖 Auto‑sent ${method} instructions to guest donation #${donation.id}`);
+
+      // Send email to guest (if email utils are available)
+      try {
+        await sendGuestDonationInstructions({
+          to: donation.guest_email,
+          guestName: donation.guest_name || 'Valued Donor',
+          amount: donation.amount,
+          campaignTitle: donation.campaign_title,
+          instructions: instructions,
+          donationId: donation.id,
+          paymentMethod: method
+        });
+      } catch (emailErr) {
+        console.warn(`Failed to send auto‑email for donation #${donation.id}:`, emailErr.message);
+      }
+    }
+
+    if (stale.rows.length) {
+      console.log(`📧 Auto‑instructions sent to ${stale.rows.length} stale guest donations.`);
+    }
+  } catch (err) {
+    console.error('Auto‑instruction fallback error:', err);
+  }
+};
+
+// Run once on startup to catch any already stale donations
+checkStaleGuestDonations();
+
+// Then schedule every 3 minutes (180,000 ms) to catch new stale donations
+const intervalId = setInterval(checkStaleGuestDonations, 3 * 60 * 1000);
+
+// Clean up interval on server shutdown (optional but good practice)
+process.on('SIGTERM', () => clearInterval(intervalId));
+process.on('SIGINT', () => clearInterval(intervalId));
 
 module.exports = router;
