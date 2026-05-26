@@ -1,59 +1,75 @@
 const router = require('express').Router()
 const pool = require('../config/db')
 
-// GET /api/settings/public – returns public-safe settings (social links, banner content, etc.)
+// GET /api/settings/public – returns public-safe settings (hero, impact stats, social links)
 router.get('/settings/public', async (req, res, next) => {
   try {
-    // Fetch content settings
+    // Fetch the 'content' JSON from settings table
     const result = await pool.query(
-      "SELECT key, value FROM settings WHERE key IN ('content')"
+      "SELECT value FROM settings WHERE key = 'content'"
     )
 
-    let socialLinks = {}
-    let heroTitle = 'Together We Can Make a Difference'
-    let heroSubtitle = 'Join thousands of donors empowering education, healthcare, and clean water across the globe.'
-    let heroBadge = 'Making A Real Difference'
-    let impactTitle = 'Our Impact'
-    let impactSubtitle = 'Where Your Money Goes'
-    let impactStats = { efficiency: '89%', lives: '14K+', projects: '120+', transparency: '100%' }
-
-    for (const row of result.rows) {
-      if (row.key === 'content') {
-        try {
-          const content = JSON.parse(row.value)
-          socialLinks = content.social_links || {}
-          heroTitle = content.hero_title || heroTitle
-          heroSubtitle = content.hero_subtitle || heroSubtitle
-          heroBadge = content.hero_badge || heroBadge
-          impactTitle = content.impact_title || impactTitle
-          impactSubtitle = content.impact_subtitle || impactSubtitle
-          impactStats = content.impact_stats || impactStats
-        } catch (err) {
-          console.warn('Failed to parse content settings:', err.message)
-        }
+    let content = {}
+    if (result.rows.length > 0) {
+      try {
+        content = JSON.parse(result.rows[0].value)
+      } catch (err) {
+        console.warn('Failed to parse content settings:', err.message)
       }
     }
 
-    res.json({
-      social_links: socialLinks,
-      hero_title: heroTitle,
-      hero_subtitle: heroSubtitle,
-      hero_badge: heroBadge,
-      impact_title: impactTitle,
-      impact_subtitle: impactSubtitle,
-      impact_stats: impactStats,
-    })
+    // Default values (must match the shape admin saves)
+    const defaults = {
+      hero_badge: 'Making A Real Difference',
+      hero_title: 'Every Contribution Builds A Brighter Tomorrow',
+      hero_subtitle: 'Join thousands of donors empowering education, healthcare, and clean water across the globe.',
+      impact_stats: {
+        active_projects: 0,
+        funds_raised: '$0',
+        transparency: '100%',
+        program_efficiency: '89%',
+        lives_impacted: '14K+',
+        projects_funded: '120+'
+      },
+      social_links: {
+        facebook: '#',
+        twitter: '#',
+        instagram: '#',
+        linkedin: '#'
+      }
+    }
+
+    // Merge saved content with defaults (saved content takes precedence)
+    const merged = {
+      hero_badge: content.hero_badge || defaults.hero_badge,
+      hero_title: content.hero_title || defaults.hero_title,
+      hero_subtitle: content.hero_subtitle || defaults.hero_subtitle,
+      impact_stats: { ...defaults.impact_stats, ...(content.impact_stats || {}) },
+      social_links: { ...defaults.social_links, ...(content.social_links || {}) }
+    }
+
+    res.json(merged)
   } catch (err) {
     console.error('Error fetching public settings:', err.message)
-    // Return default values instead of failing
+    // Fallback to defaults on error
     res.json({
-      social_links: {},
-      hero_title: 'Together We Can Make a Difference',
-      hero_subtitle: 'Join thousands of donors empowering education, healthcare, and clean water across the globe.',
       hero_badge: 'Making A Real Difference',
-      impact_title: 'Our Impact',
-      impact_subtitle: 'Where Your Money Goes',
-      impact_stats: { efficiency: '89%', lives: '14K+', projects: '120+', transparency: '100%' }
+      hero_title: 'Every Contribution Builds A Brighter Tomorrow',
+      hero_subtitle: 'Join thousands of donors empowering education, healthcare, and clean water across the globe.',
+      impact_stats: {
+        active_projects: 0,
+        funds_raised: '$0',
+        transparency: '100%',
+        program_efficiency: '89%',
+        lives_impacted: '14K+',
+        projects_funded: '120+'
+      },
+      social_links: {
+        facebook: '#',
+        twitter: '#',
+        instagram: '#',
+        linkedin: '#'
+      }
     })
   }
 })
@@ -61,13 +77,11 @@ router.get('/settings/public', async (req, res, next) => {
 // GET /api/maintenance-status – returns maintenance mode status for frontend
 router.get('/maintenance-status', async (req, res, next) => {
   try {
-    // Get maintenance mode setting
     const modeResult = await pool.query(
       "SELECT value FROM settings WHERE key = 'maintenance_mode'"
     )
     const enabled = modeResult.rows.length ? modeResult.rows[0].value === 'true' : false
     
-    // Get maintenance message
     const messageResult = await pool.query(
       "SELECT value FROM settings WHERE key = 'maintenance_message'"
     )
@@ -82,7 +96,6 @@ router.get('/maintenance-status', async (req, res, next) => {
     })
   } catch (err) {
     console.error('Failed to get maintenance status:', err.message)
-    // Return default values (maintenance OFF) instead of failing
     res.json({
       maintenance_mode: false,
       enabled: false,
@@ -94,7 +107,6 @@ router.get('/maintenance-status', async (req, res, next) => {
 // GET /api/health – simple health check for frontend
 router.get('/health', async (req, res) => {
   try {
-    // Check database connection
     await pool.query('SELECT 1')
     res.json({
       status: 'healthy',

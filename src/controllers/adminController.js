@@ -378,38 +378,71 @@ const saveSettings = async (req, res, next) => {
   } catch (err) { next(err); }
 };
 
-// ── Content (UPDATED - Stores individual content fields separately) ──
+// ── Content (UPDATED to match homepage expectations) ────────────────
 const getContent = async (req, res, next) => {
   try {
-    // Try to get content from settings table
     const result = await pool.query(
       "SELECT value FROM settings WHERE key = 'content'"
     );
     
-    let content = {
+    // Default content structure that matches HomePage expectations
+    const defaultContent = {
       hero_title: 'Every Contribution Builds A Brighter Tomorrow',
       hero_subtitle: 'Join thousands of donors empowering education, healthcare, and clean water across the globe.',
       hero_badge: 'Making A Real Difference',
-      impact_stats: { raised: '$0', campaigns: '0', donors: '0' },
-      social_links: { facebook: '', twitter: '', instagram: '', youtube: '', linkedin: '' }
+      impact_stats: {
+        active_projects: 0,
+        funds_raised: '$0',
+        transparency: '100%',
+        program_efficiency: '89%',
+        lives_impacted: '14K+',
+        projects_funded: '120+'
+      },
+      social_links: {
+        facebook: '',
+        twitter: '',
+        instagram: '',
+        linkedin: ''
+      }
     };
     
     if (result.rows.length) {
       const savedContent = JSON.parse(result.rows[0].value);
-      content = { ...content, ...savedContent };
+      // Merge saved content with defaults (saved takes precedence)
+      return res.json({
+        ...defaultContent,
+        ...savedContent,
+        impact_stats: {
+          ...defaultContent.impact_stats,
+          ...(savedContent.impact_stats || {})
+        },
+        social_links: {
+          ...defaultContent.social_links,
+          ...(savedContent.social_links || {})
+        }
+      });
     }
     
-    res.json({ content });
+    res.json(defaultContent);
   } catch (err) { 
     console.error('Get content error:', err);
-    // Return default content on error
-    res.json({ 
-      content: {
-        hero_title: 'Every Contribution Builds A Brighter Tomorrow',
-        hero_subtitle: 'Join thousands of donors empowering education, healthcare, and clean water across the globe.',
-        hero_badge: 'Making A Real Difference',
-        impact_stats: { raised: '$0', campaigns: '0', donors: '0' },
-        social_links: { facebook: '', twitter: '', instagram: '', youtube: '', linkedin: '' }
+    res.json({
+      hero_title: 'Every Contribution Builds A Brighter Tomorrow',
+      hero_subtitle: 'Join thousands of donors empowering education, healthcare, and clean water across the globe.',
+      hero_badge: 'Making A Real Difference',
+      impact_stats: {
+        active_projects: 0,
+        funds_raised: '$0',
+        transparency: '100%',
+        program_efficiency: '89%',
+        lives_impacted: '14K+',
+        projects_funded: '120+'
+      },
+      social_links: {
+        facebook: '',
+        twitter: '',
+        instagram: '',
+        linkedin: ''
       }
     });
   }
@@ -419,12 +452,25 @@ const saveContent = async (req, res, next) => {
   try {
     const { hero_title, hero_subtitle, hero_badge, impact_stats, social_links } = req.body;
     
+    // Build complete content object with all fields
     const content = {
       hero_title: hero_title || 'Every Contribution Builds A Brighter Tomorrow',
       hero_subtitle: hero_subtitle || 'Join thousands of donors empowering education, healthcare, and clean water across the globe.',
       hero_badge: hero_badge || 'Making A Real Difference',
-      impact_stats: impact_stats || { raised: '$0', campaigns: '0', donors: '0' },
-      social_links: social_links || { facebook: '', twitter: '', instagram: '', youtube: '', linkedin: '' }
+      impact_stats: {
+        active_projects: impact_stats?.active_projects || impact_stats?.campaigns || 0,
+        funds_raised: impact_stats?.funds_raised || impact_stats?.raised || '$0',
+        transparency: impact_stats?.transparency || '100%',
+        program_efficiency: impact_stats?.program_efficiency || '89%',
+        lives_impacted: impact_stats?.lives_impacted || '14K+',
+        projects_funded: impact_stats?.projects_funded || '120+'
+      },
+      social_links: {
+        facebook: social_links?.facebook || '',
+        twitter: social_links?.twitter || '',
+        instagram: social_links?.instagram || '',
+        linkedin: social_links?.linkedin || ''
+      }
     };
     
     await pool.query(
@@ -433,23 +479,21 @@ const saveContent = async (req, res, next) => {
       [JSON.stringify(content)]
     );
     
-    // Also store individual settings for easier access
+    // Also store legacy simple stats for backward compatibility
     await pool.query(
       `INSERT INTO settings (key, value) VALUES ('hero_title', $1)
        ON CONFLICT (key) DO UPDATE SET value = EXCLUDED.value`,
-      [hero_title || 'Every Contribution Builds A Brighter Tomorrow']
+      [content.hero_title]
     );
-    
     await pool.query(
       `INSERT INTO settings (key, value) VALUES ('hero_subtitle', $1)
        ON CONFLICT (key) DO UPDATE SET value = EXCLUDED.value`,
-      [hero_subtitle || 'Join thousands of donors empowering education, healthcare, and clean water across the globe.']
+      [content.hero_subtitle]
     );
-    
     await pool.query(
       `INSERT INTO settings (key, value) VALUES ('hero_badge', $1)
        ON CONFLICT (key) DO UPDATE SET value = EXCLUDED.value`,
-      [hero_badge || 'Making A Real Difference']
+      [content.hero_badge]
     );
     
     // Log to audit
