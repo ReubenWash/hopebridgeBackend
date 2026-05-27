@@ -18,6 +18,7 @@ const userRoutes     = require('./routes/users')
 const adminFeaturesRoutes = require('./routes/adminFeaturesRoutes')
 const notificationRoutes = require('./routes/notificationRoutes')
 const guestDonationRoutes = require('./routes/guestDonationRoutes')
+const userNotificationRoutes = require('./routes/userNotificationRoutes') // NEW
 
 const { authenticate, requireAdmin } = require('./middleware/auth')
 const { errorHandler } = require('./middleware/errorHandler')
@@ -371,6 +372,9 @@ app.use('/api/wallet',    walletRoutes)
 // GUEST DONATION ROUTES
 app.use('/api/guest-donations', guestDonationLimiter, guestDonationRoutes)
 
+// USER NOTIFICATION ROUTES (for donors and creators)
+app.use('/api/notifications', userNotificationRoutes)
+
 /* ── 404 handler ────────────────────────────────── */
 app.use((req, res) => {
   res.status(404).json({ 
@@ -408,6 +412,7 @@ runMigrations().then(() => {
     console.log(`📱 Push notification routes available at: /api/admin/notifications`)
     console.log(`👥 GUEST DONATION routes available at: /api/guest-donations`)
     console.log(`📝 CONTENT routes available at: /api/content`)
+    console.log(`🔔 User notification routes available at: /api/notifications`)
   })
 }).catch(err => {
   console.error('Fatal startup error:', err)
