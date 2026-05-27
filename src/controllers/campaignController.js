@@ -283,7 +283,9 @@ const createCampaign = async (req, res, next) => {
   }
 };
 
-// PATCH /api/campaigns/:id — creator only, only if pending
+// ──────────────────────────────────────────────────────────────────────
+// UPDATE CAMPAIGN – NOW ALLOWS EDITING OF APPROVED CAMPAIGNS
+// ──────────────────────────────────────────────────────────────────────
 const updateCampaign = async (req, res, next) => {
   try {
     const { id } = req.params;
@@ -299,9 +301,11 @@ const updateCampaign = async (req, res, next) => {
     
     const existingCampaign = existing.rows[0];
     
-    if (existingCampaign.status !== 'pending') {
+    // Allow editing if campaign is pending OR approved (or if user is admin)
+    // Block editing only for completed or rejected campaigns
+    if (existingCampaign.status !== 'pending' && existingCampaign.status !== 'approved') {
       return res.status(403).json({ 
-        error: `Only pending campaigns can be edited. Current status: ${existingCampaign.status}` 
+        error: `Cannot edit a ${existingCampaign.status} campaign. Only pending or approved campaigns can be edited.` 
       });
     }
 
