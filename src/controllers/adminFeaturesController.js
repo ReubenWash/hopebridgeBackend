@@ -1,12 +1,42 @@
-// controllers/adminFeaturesController.js
 const pool = require('../config/db');
 const { sendPushNotification: sendFCMNotification, sendToRole, sendToAll, sendToUser } = require('../config/firebase');
 const { uploadToImageKit, deleteFromImageKit } = require('../config/imagekit');
+
+// Helper to check if a table exists
+const tableExists = async (tableName) => {
+  const result = await pool.query(`
+    SELECT EXISTS (
+      SELECT 1 FROM information_schema.tables 
+      WHERE table_name = $1
+    )
+  `, [tableName]);
+  return result.rows[0].exists;
+};
+
+// Helper to check if a column exists
+const columnExists = async (tableName, columnName) => {
+  const result = await pool.query(`
+    SELECT EXISTS (
+      SELECT 1 FROM information_schema.columns 
+      WHERE table_name = $1 AND column_name = $2
+    )
+  `, [tableName, columnName]);
+  return result.rows[0].exists;
+};
 
 // ============ PAYOUT RECONCILIATION ============
 
 const getPayoutHistory = async (req, res, next) => {
   try {
+    // Check if withdrawal_requests table exists
+    if (!(await tableExists('withdrawal_requests'))) {
+      return res.json({
+        payouts: [],
+        pagination: { page: 1, limit: 50, total: 0, pages: 0 },
+        totals: { total_pending: 0, total_approved: 0, total_paid: 0 }
+      });
+    }
+
     const { startDate, endDate, status, page = 1, limit = 50 } = req.query;
     const offset = (parseInt(page) - 1) * parseInt(limit);
     
@@ -68,7 +98,14 @@ const getPayoutHistory = async (req, res, next) => {
       },
       totals: totals.rows[0]
     });
-  } catch (err) { next(err); }
+  } catch (err) {
+    console.error('getPayoutHistory error:', err.message);
+    res.json({
+      payouts: [],
+      pagination: { page: 1, limit: 50, total: 0, pages: 0 },
+      totals: { total_pending: 0, total_approved: 0, total_paid: 0 }
+    });
+  }
 };
 
 const markAsPaid = async (req, res, next) => {
@@ -111,6 +148,13 @@ const markAsPaid = async (req, res, next) => {
 
 const getPayoutSummary = async (req, res, next) => {
   try {
+    if (!(await tableExists('withdrawal_requests'))) {
+      return res.json({
+        summary: { total_withdrawals: 0, total_amount: 0, pending_amount: 0, approved_amount: 0, paid_amount: 0, rejected_amount: 0 },
+        monthly: []
+      });
+    }
+
     const result = await pool.query(`
       SELECT 
         COUNT(*) as total_withdrawals,
@@ -138,13 +182,32 @@ const getPayoutSummary = async (req, res, next) => {
       summary: result.rows[0],
       monthly: monthly.rows
     });
-  } catch (err) { next(err); }
+  } catch (err) {
+    console.error('getPayoutSummary error:', err.message);
+    res.json({
+      summary: { total_withdrawals: 0, total_amount: 0, pending_amount: 0, approved_amount: 0, paid_amount: 0, rejected_amount: 0 },
+      monthly: []
+    });
+  }
 };
 
 // ============ TRANSACTION FEE MANAGEMENT ============
 
 const getFeeSettings = async (req, res, next) => {
   try {
+    if (!(await tableExists('platform_fees'))) {
+      return res.json({
+        percentage: 0,
+        fixed_amount: 0,
+        min_fee: 0,
+        max_fee: null,
+        withdrawal_fee: 0,
+        minimum_withdrawal: 10,
+        minimum_deposit: 1,
+        maximum_deposit: null
+      });
+    }
+
     const result = await pool.query(`SELECT * FROM platform_fees ORDER BY id DESC LIMIT 1`);
     
     if (result.rows.length === 0) {
@@ -329,6 +392,10 @@ const sendNotification = async (req, res, next) => {
 
 const getNotificationHistory = async (req, res, next) => {
   try {
+    if (!(await tableExists('push_notifications'))) {
+      return res.json({ notifications: [], pagination: { total: 0, pages: 0 } });
+    }
+
     const { page = 1, limit = 50 } = req.query;
     const offset = (parseInt(page) - 1) * parseInt(limit);
     
@@ -358,7 +425,7 @@ const getNotificationHistory = async (req, res, next) => {
   }
 };
 
-// ============ ADMIN CAMPAIGN MANAGEMENT (NEW) ============
+// ============ ADMIN CAMPAIGN MANAGEMENT ============
 
 const createCampaign = async (req, res, next) => {
   try {
@@ -511,7 +578,7 @@ const updateCampaignProgress = async (req, res, next) => {
   } catch (err) { next(err); }
 };
 
-// ============ ADMIN USER MANAGEMENT (NEW) ============
+// ============ ADMIN USER MANAGEMENT ============
 
 const updateUser = async (req, res, next) => {
   try {
@@ -547,9 +614,7 @@ const updateUser = async (req, res, next) => {
   } catch (err) { next(err); }
 };
 
-// ============ ADMIN WALLET ADJUSTMENT (NEW) ============
-
-// ============ ADMIN WALLET ADJUSTMENT (UPDATED) ============
+// ============ ADMIN WALLET ADJUSTMENT ============
 
 const adjustWallet = async (req, res, next) => {
   const client = await pool.connect();
@@ -563,7 +628,6 @@ const adjustWallet = async (req, res, next) => {
     }
     
     // Map frontend types to adjustment amount
-    // Accept both 'credit'/'debit' and 'add'/'remove' for compatibility
     let adjustmentAmount;
     let transactionType;
     
@@ -654,6 +718,10 @@ const adjustWallet = async (req, res, next) => {
 
 const getCreatorVerifications = async (req, res, next) => {
   try {
+    if (!(await tableExists('creator_verifications'))) {
+      return res.json({ verifications: [] });
+    }
+
     const { status } = req.query;
     let query = `
       SELECT cv.*, u.name, u.email, u.created_at as user_created_at
@@ -789,6 +857,10 @@ const getTopDonors = async (req, res, next) => {
 
 const getRecurringDonations = async (req, res, next) => {
   try {
+    if (!(await tableExists('donor_subscriptions'))) {
+      return res.json({ subscriptions: [], totals: { total_subscriptions: 0, monthly_recurring: 0 } });
+    }
+
     const { status = 'active' } = req.query;
     
     const result = await pool.query(`
@@ -842,6 +914,7 @@ const updateSubscriptionStatus = async (req, res, next) => {
 
 const getDonorAnalytics = async (req, res, next) => {
   try {
+    // If donations table doesn't have escrow_status, the query might fail
     const result = await pool.query(`
       SELECT 
         COUNT(DISTINCT donor_id) as total_donors,
@@ -856,7 +929,7 @@ const getDonorAnalytics = async (req, res, next) => {
         GROUP BY DATE(created_at)
       ) daily
       WHERE d.escrow_status = 'released'
-    `);
+    `).catch(() => ({ rows: [{ total_donors: 0, new_donors_month: 0, active_donors_week: 0, avg_daily_donation: 0 }] }));
     
     const retention = await pool.query(`
       WITH donor_activity AS (
@@ -874,17 +947,30 @@ const getDonorAnalytics = async (req, res, next) => {
         COUNT(CASE WHEN donation_count > 1 THEN 1 END) as returning_donors,
         COUNT(CASE WHEN last_donation >= DATE_TRUNC('month', NOW()) THEN 1 END) as active_this_month
       FROM donor_activity
-    `);
+    `).catch(() => ({ rows: [{ total_donors: 0, returning_donors: 0, active_this_month: 0 }] }));
     
     res.json({
       analytics: result.rows[0],
       retention: retention.rows[0]
     });
-  } catch (err) { next(err); }
+  } catch (err) { 
+    console.error('getDonorAnalytics error:', err.message);
+    res.json({
+      analytics: { total_donors: 0, new_donors_month: 0, active_donors_week: 0, avg_daily_donation: 0 },
+      retention: { total_donors: 0, returning_donors: 0, active_this_month: 0 }
+    });
+  }
 };
 
 const getAuditLogs = async (req, res, next) => {
   try {
+    if (!(await tableExists('audit_logs'))) {
+      return res.json({
+        logs: [],
+        pagination: { page: 1, limit: 50, total: 0, pages: 0 }
+      });
+    }
+
     const { action, admin_id, startDate, endDate, page = 1, limit = 50 } = req.query;
     const offset = (parseInt(page) - 1) * parseInt(limit);
     
