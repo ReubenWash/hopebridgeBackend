@@ -551,31 +551,59 @@ const updateCampaign = async (req, res, next) => {
   } catch (err) { next(err); }
 };
 
+// ============ UPDATED: ADMIN CAMPAIGN PROGRESS (uses manual_adjustment) ============
 const updateCampaignProgress = async (req, res, next) => {
   try {
     const { id } = req.params;
-    const { raised } = req.body;
+    const { raised } = req.body;  // desired total raised amount (admin enters target total)
     
     if (raised === undefined || parseFloat(raised) < 0) {
       return res.status(400).json({ error: 'Valid raised amount is required' });
     }
     
+    // Get the sum of real donations for this campaign
+    const donationsSum = await pool.query(
+      `SELECT COALESCE(SUM(amount), 0) as total FROM donations WHERE campaign_id = $1`,
+      [id]
+    );
+    const realTotal = parseFloat(donationsSum.rows[0].total);
+    const desiredTotal = parseFloat(raised);
+    
+    // Calculate required manual adjustment: desiredTotal - realTotal
+    const newAdjustment = desiredTotal - realTotal;
+    
+    // Update only the manual_adjustment column, not the raised column
     const result = await pool.query(
-      `UPDATE campaigns SET raised = $1, updated_at = NOW() WHERE id = $2 RETURNING *`,
-      [parseFloat(raised), id]
+      `UPDATE campaigns SET manual_adjustment = $1, updated_at = NOW() WHERE id = $2 RETURNING *`,
+      [newAdjustment, id]
     );
     
     if (result.rows.length === 0) {
       return res.status(404).json({ error: 'Campaign not found' });
     }
     
+    // Log to audit
     await pool.query(`
       INSERT INTO audit_logs (admin_id, action, entity_type, entity_id, details, ip_address)
       VALUES ($1, $2, $3, $4, $5, $6)
-    `, [req.user.id, 'campaign_progress_updated', 'campaign', id, JSON.stringify({ new_raised: parseFloat(raised) }), req.ip]);
+    `, [req.user.id, 'campaign_manual_adjustment', 'campaign', id, JSON.stringify({ 
+      old_adjustment: result.rows[0].manual_adjustment - newAdjustment, 
+      new_adjustment: newAdjustment,
+      real_total: realTotal,
+      desired_total: desiredTotal
+    }), req.ip]);
     
-    res.json({ message: 'Progress updated', campaign: result.rows[0] });
-  } catch (err) { next(err); }
+    res.json({ 
+      message: `Progress manually adjusted. Total raised is now $${desiredTotal.toFixed(2)} (donations: $${realTotal.toFixed(2)} + manual override: $${newAdjustment.toFixed(2)})`,
+      campaign: result.rows[0],
+      real_total: realTotal,
+      manual_adjustment: newAdjustment,
+      displayed_total: desiredTotal
+    });
+  } catch (err) { 
+    console.error('Update progress error:', err);
+    next(err); 
+  }
 };
 
 // ============ ADMIN USER MANAGEMENT ============

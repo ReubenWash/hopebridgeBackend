@@ -458,6 +458,7 @@ const migrate = async (closePool = true) => {
       ALTER TABLE campaigns ADD COLUMN IF NOT EXISTS completion_requested_at TIMESTAMPTZ;
       ALTER TABLE campaigns ADD COLUMN IF NOT EXISTS completed_at TIMESTAMPTZ;
       ALTER TABLE campaigns ADD COLUMN IF NOT EXISTS image_file_id VARCHAR(255);
+      ALTER TABLE campaigns ADD COLUMN IF NOT EXISTS manual_adjustment NUMERIC(12,2) DEFAULT 0;
       ALTER TABLE disputes ADD COLUMN IF NOT EXISTS resolution TEXT;
       ALTER TABLE disputes ADD COLUMN IF NOT EXISTS resolved_at TIMESTAMPTZ;
       ALTER TABLE creator_verifications ADD COLUMN IF NOT EXISTS id_document_number VARCHAR(100);
@@ -693,6 +694,7 @@ const migrate = async (closePool = true) => {
     console.log('🏆 Top donors view created')
     console.log('👥 GUEST DONATIONS table created for account-less donations')
     console.log('📧 Guest donation email templates added')
+    console.log('➕ Added manual_adjustment column to campaigns table for manual progress overrides')
 
   } catch (err) {
     console.error('❌ Migration failed:', err.message)

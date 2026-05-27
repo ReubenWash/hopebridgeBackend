@@ -100,7 +100,7 @@ const getAllCampaigns = async (req, res, next) => {
     values.push(parseInt(limit), offset);
     const result = await pool.query(`
       SELECT c.*, u.name AS creator_name, u.id AS creator_id,
-             (SELECT COALESCE(SUM(amount),0) FROM donations WHERE campaign_id = c.id) AS raised
+             (COALESCE((SELECT SUM(amount) FROM donations WHERE campaign_id = c.id), 0) + COALESCE(c.manual_adjustment, 0)) AS raised
       FROM campaigns c
       JOIN users u ON c.creator_id = u.id
       ${where}
@@ -131,7 +131,7 @@ const getCampaign = async (req, res, next) => {
   try {
     const result = await pool.query(`
       SELECT c.*, u.name AS creator_name, u.id AS creator_id,
-             (SELECT COALESCE(SUM(amount),0) FROM donations WHERE campaign_id = c.id) AS raised
+             (COALESCE((SELECT SUM(amount) FROM donations WHERE campaign_id = c.id), 0) + COALESCE(c.manual_adjustment, 0)) AS raised
       FROM campaigns c
       JOIN users u ON c.creator_id = u.id
       WHERE c.id = $1
@@ -283,9 +283,7 @@ const createCampaign = async (req, res, next) => {
   }
 };
 
-// ──────────────────────────────────────────────────────────────────────
 // UPDATE CAMPAIGN – NOW ALLOWS EDITING OF APPROVED CAMPAIGNS
-// ──────────────────────────────────────────────────────────────────────
 const updateCampaign = async (req, res, next) => {
   try {
     const { id } = req.params;
@@ -393,19 +391,30 @@ const updateCampaign = async (req, res, next) => {
   }
 };
 
-// PATCH /api/admin/campaigns/:id/progress — ADMIN only update progress
+// PATCH /api/admin/campaigns/:id/progress — ADMIN only update progress (now updates manual_adjustment)
 const updateCampaignProgress = async (req, res, next) => {
   try {
     const { id } = req.params;
-    const { raised } = req.body;
+    const { raised } = req.body;  // desired total raised amount
     
     if (raised === undefined || parseFloat(raised) < 0) {
       return res.status(400).json({ error: 'Valid raised amount is required' });
     }
     
+    // Get real donations sum for this campaign
+    const donationsSum = await pool.query(
+      `SELECT COALESCE(SUM(amount), 0) as total FROM donations WHERE campaign_id = $1`,
+      [id]
+    );
+    const realTotal = parseFloat(donationsSum.rows[0].total);
+    const desiredTotal = parseFloat(raised);
+    
+    // Calculate new manual adjustment: desiredTotal - realTotal
+    const newAdjustment = desiredTotal - realTotal;
+    
     const result = await pool.query(
-      `UPDATE campaigns SET raised = $1, updated_at = NOW() WHERE id = $2 RETURNING *`,
-      [parseFloat(raised), id]
+      `UPDATE campaigns SET manual_adjustment = $1, updated_at = NOW() WHERE id = $2 RETURNING *`,
+      [newAdjustment, id]
     );
     
     if (result.rows.length === 0) {
@@ -416,11 +425,19 @@ const updateCampaignProgress = async (req, res, next) => {
     await pool.query(`
       INSERT INTO audit_logs (admin_id, action, entity_type, entity_id, details, ip_address)
       VALUES ($1, $2, $3, $4, $5, $6)
-    `, [req.user.id, 'campaign_progress_updated', 'campaign', id, JSON.stringify({ new_raised: parseFloat(raised) }), req.ip]);
+    `, [req.user.id, 'campaign_manual_adjustment', 'campaign', id, JSON.stringify({ 
+      old_adjustment: result.rows[0].manual_adjustment - newAdjustment, 
+      new_adjustment: newAdjustment,
+      real_total: realTotal,
+      desired_total: desiredTotal
+    }), req.ip]);
     
     res.json({ 
-      message: 'Progress updated successfully', 
-      campaign: result.rows[0] 
+      message: `Progress manually adjusted. Total raised is now $${desiredTotal.toFixed(2)} (donations: $${realTotal.toFixed(2)} + manual override: $${newAdjustment.toFixed(2)})`,
+      campaign: result.rows[0],
+      real_total: realTotal,
+      manual_adjustment: newAdjustment,
+      displayed_total: desiredTotal
     });
   } catch (err) { 
     console.error('Update progress error:', err);
@@ -464,7 +481,7 @@ const getMyCampaigns = async (req, res, next) => {
   try {
     const result = await pool.query(`
       SELECT c.*, u.id AS creator_id,
-             (SELECT COALESCE(SUM(amount),0) FROM donations WHERE campaign_id = c.id) AS raised
+             (COALESCE((SELECT SUM(amount) FROM donations WHERE campaign_id = c.id), 0) + COALESCE(c.manual_adjustment, 0)) AS raised
       FROM campaigns c
       JOIN users u ON c.creator_id = u.id
       WHERE c.creator_id = $1
@@ -613,7 +630,7 @@ const adminGetAllCampaigns = async (req, res, next) => {
 
     const result = await pool.query(`
       SELECT c.*, u.name AS creator_name, u.id AS creator_id,
-             (SELECT COALESCE(SUM(amount),0) FROM donations WHERE campaign_id = c.id) AS raised
+             (COALESCE((SELECT SUM(amount) FROM donations WHERE campaign_id = c.id), 0) + COALESCE(c.manual_adjustment, 0)) AS raised
       FROM campaigns c JOIN users u ON c.creator_id = u.id
       ${where}
       ORDER BY c.created_at DESC
@@ -761,13 +778,9 @@ const adminReleaseCampaignEscrow = async (req, res, next) => {
       totalReleased += parseFloat(escrow.amount);
     }
 
+    // No longer update campaigns.raised – it's computed from donations + manual_adjustment
     await client.query(
-      `UPDATE campaigns SET raised = raised + $1, status = 'completed' WHERE id = $2`,
-      [totalReleased, id]
-    );
-
-    await client.query(
-      `UPDATE campaigns SET completion_requested = FALSE WHERE id = $1`,
+      `UPDATE campaigns SET completion_requested = FALSE, status = 'completed' WHERE id = $1`,
       [id]
     );
 
@@ -897,7 +910,7 @@ const getRelatedCampaigns = async (req, res, next) => {
     
     const result = await pool.query(`
       SELECT c.*, u.name AS creator_name,
-             (SELECT COALESCE(SUM(amount),0) FROM donations WHERE campaign_id = c.id) AS raised
+             (COALESCE((SELECT SUM(amount) FROM donations WHERE campaign_id = c.id), 0) + COALESCE(c.manual_adjustment, 0)) AS raised
       FROM campaigns c
       JOIN users u ON c.creator_id = u.id
       WHERE c.category = $1 AND c.id != $2 AND c.status = 'approved'
