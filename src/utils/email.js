@@ -296,7 +296,8 @@ async function sendWithdrawalStatusEmail({ to, userName, amount, status, adminNo
 // ── Guest Donation Emails (NEW) ────────────────────────
 
 async function sendGuestDonationInstructions({ to, guestName, amount, campaignTitle, instructions, donationId }) {
-  const uploadLink = `${process.env.FRONTEND_URL || 'https://hopebridge-inky.vercel.app'}/guest-donation/upload/${donationId}`
+  // UPDATED: Use the new resume route instead of upload route
+  const resumeLink = `${process.env.FRONTEND_URL || 'https://hopebridge-inky.vercel.app'}/guest-donation/resume/${donationId}`
   
   return await send({
     to,
@@ -316,12 +317,12 @@ async function sendGuestDonationInstructions({ to, guestName, amount, campaignTi
         <ol style="margin-left: 20px; line-height: 1.6;">
           <li>Make the payment using the instructions above</li>
           <li>Keep your payment confirmation/screenshot</li>
-          <li>Click the link below to upload your payment proof</li>
+          <li>Click the link below to return to your donation page and upload proof</li>
         </ol>
       </div>
       
       <p style="text-align: center;">
-        <a href="${uploadLink}" class="btn">Upload Payment Proof</a>
+        <a href="${resumeLink}" class="btn">Continue Your Donation</a>
       </p>
       
       <p style="margin-top: 20px; font-size: 12px; color: #666;">
