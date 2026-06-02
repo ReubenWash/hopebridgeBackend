@@ -961,6 +961,22 @@ const getCreatorCampaign = async (req, res, next) => {
   }
 };
 
+// ========== NEW: GET ESCROW SUM FOR A CAMPAIGN ==========
+const getCampaignEscrowSum = async (req, res, next) => {
+  try {
+    const { id } = req.params;
+    const result = await pool.query(
+      `SELECT COALESCE(SUM(amount), 0) as held_amount
+       FROM escrow_holds
+       WHERE campaign_id = $1 AND status = 'held'`,
+      [id]
+    );
+    res.json({ held_amount: parseFloat(result.rows[0].held_amount) });
+  } catch (err) { 
+    next(err); 
+  }
+};
+
 module.exports = {
   getAllCampaigns,
   getCampaign,
@@ -981,4 +997,5 @@ module.exports = {
   addGalleryImages,
   removeGalleryImage,
   getCreatorCampaign,
+  getCampaignEscrowSum,   // <-- ADDED
 };

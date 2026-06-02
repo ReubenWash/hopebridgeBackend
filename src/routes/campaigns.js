@@ -58,6 +58,7 @@ router.get('/:id', getCampaign)
 router.get('/:id/updates', getCampaignUpdates)
 router.get('/:id/related', getRelatedCampaigns)
 
+
 // ── Public Gallery endpoint (no authentication) ──
 router.get('/:id/gallery', async (req, res, next) => {
   try {
@@ -130,6 +131,7 @@ router.delete('/:id', authenticate, requireCreator, deleteCampaign)
 
 // Creator requests escrow release
 router.post('/:id/complete-request', authenticate, requireCreator, requestCampaignCompletion)
+router.get('/:id/escrow-sum', authenticate, requireCreator, getCampaignEscrowSum);
 
 // ── ADMIN: Update campaign progress (raised amount) ──
 router.patch('/:id/progress', authenticate, requireAdmin, async (req, res, next) => {
